@@ -85,7 +85,7 @@ typedef struct {
 
 void cell_interface_init(SPI_HandleTypeDef* const hspi_ptr, TIM_HandleTypeDef* const htim_ptr);
 
-void set_voltage(uint8_t subpack_num, uint8_t cell_num, int16_t voltage_raw);
+void set_voltage(uint8_t subpack_num, uint8_t cell_num, int16_t voltage_raw, int16_t filt_voltage_raw);
 float get_voltage(uint8_t subpack_num, uint8_t cell_num);
 float get_filtered_voltage(uint8_t subpack_num, uint8_t cell_num);
 int16_t get_voltage_raw(uint8_t subpack_num, uint8_t cell_num);

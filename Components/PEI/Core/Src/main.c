@@ -55,6 +55,7 @@
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc2;
 ADC_HandleTypeDef hadc3;
+DMA_HandleTypeDef hdma_adc3;
 
 CAN_HandleTypeDef hcan1;
 CAN_HandleTypeDef hcan2;
@@ -69,6 +70,7 @@ TIM_HandleTypeDef htim7;
 TIM_HandleTypeDef htim10;
 
 UART_HandleTypeDef huart3;
+DMA_HandleTypeDef hdma_usart3_tx;
 
 /* USER CODE BEGIN PV */
 // PEI parameters
@@ -99,10 +101,16 @@ extern uint8_t charge_control;
 extern uint8_t charge_profile_received;
 extern uint16_t charger_max_current;
 
+extern volatile UART_TxCplt; // flag for whether UART transmission finished
+
 // Tick counters
 volatile uint32_t ticks_since_vcu_message = 0;
 volatile uint32_t ticks_since_mc_message = 0;
 volatile uint32_t ticks_since_charger_message = 0;
+
+// Buffer to store raw current measurements from ADC
+// Buffer length in bytes needs to be divisible by 32
+static volatile uint16_t current_meas_buf[16] __ALIGNED(32); // cache lines are 32 bytes long
 
 /* USER CODE END PV */
 
@@ -110,6 +118,7 @@ volatile uint32_t ticks_since_charger_message = 0;
 void SystemClock_Config(void);
 static void MPU_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_ADC2_Init(void);
 static void MX_CAN1_Init(void);
 static void MX_USART3_UART_Init(void);
@@ -125,12 +134,12 @@ static void MX_TIM7_Init(void);
 static void BMS_Init();
 static float raw_to_mvolts(uint16_t adc_raw);
 static float mvolts_to_amps(float mVolts, float mVolt_ref);
-static void update_current(uint16_t raw);
 static void set_back_fans(float duty_cycle);
 static void set_side_fans(float duty_cycle);
 
-void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* const hadc);
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc);
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim_ptr);
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef* huart);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -149,24 +158,17 @@ static float raw_to_mvolts(uint16_t adc_raw) {
 }
 
 static float mvolts_to_amps(float mVolts, float mVolt_ref) {
-	return ((mVolts - mVolt_ref) * 7.4 / 4.7) / 6.667;
+	return ((mVolts * 7.4 / 4.7) - mVolt_ref) / 6.667;
 }
 
-static void update_current(uint16_t raw) {
-	static uint8_t is_first_measurement = 1;
-	static float mVolt_ref;
+static void enable_fans() {
+	HAL_GPIO_WritePin(SCF1_EN_GPIO_Port, SCF1_EN_Pin, GPIO_PIN_SET);
+	HAL_GPIO_WritePin(SCF2_EN_GPIO_Port, SCF2_EN_Pin, GPIO_PIN_SET);
+}
 
-	bat_pack.current_raw = raw;
-	// Calculate current in Amps
-	if (is_first_measurement) {
-		bat_pack.current_ref_raw = raw;
-		mVolt_ref = raw_to_mvolts(raw);
-		is_first_measurement = 0;
-	}
-	float mVolts = raw_to_mvolts(raw);
-
-	// Move calculated current into bat_pack struct
-	bat_pack.current = mvolts_to_amps(mVolts, mVolt_ref);
+static void disable_fans() {
+	HAL_GPIO_WritePin(SCF1_EN_GPIO_Port, SCF1_EN_Pin, GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(SCF2_EN_GPIO_Port, SCF2_EN_Pin, GPIO_PIN_RESET);
 }
 
 static void set_back_fans(float duty_cycle) {
@@ -177,15 +179,26 @@ static void set_side_fans(float duty_cycle) {
 	htim2.Instance->CCR2 = (uint32_t)((1 - duty_cycle) * htim2.Instance->ARR);
 }
 
+// Timer triggers ADC conversion every 250 us (4 kHz)
+// Called when ADC conversion and DMA transfer is complete
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc) {
-	uint16_t meas = HAL_ADC_GetValue(hadc);
-	update_current(meas);
+	SCB_InvalidateDCache_by_Addr((uint32_t*)current_meas_buf, 4);
 
+	// Move raw measurements into bat_pack struct
+	bat_pack.current_raw = current_meas_buf[0];
+	bat_pack.current_ref_raw = current_meas_buf[1];
+
+	// Calculate current in Amps
+	float mVolts = raw_to_mvolts(current_meas_buf[0]);
+	float mVolt_ref = raw_to_mvolts(current_meas_buf[1]);
+
+	// Move calculated current into bat_pack struct
+	bat_pack.current = mvolts_to_amps(mVolts, mVolt_ref);
 	if (!charger_attached) can_send_PEI_Current();
 }
 
 // Called every 100 ms (10 Hz)
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim_ptr) {
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
 	if (!charger_attached) {
 		can_send_BMS_High_Level_Data();
 
@@ -201,6 +214,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim_ptr) {
 			}
 		}
 	}
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef* huart) {
+	UART_TxCplt = 1;
 }
 /* USER CODE END 0 */
 
@@ -244,6 +261,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_ADC2_Init();
   MX_CAN1_Init();
   MX_USART3_UART_Init();
@@ -257,11 +275,15 @@ int main(void)
   MX_TIM7_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_Base_Start(&htim10);
+
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
+
   HAL_TIM_Base_Start_IT(&htim7);
+
   HAL_TIM_Base_Start(&htim6);
-  HAL_ADC_Start_IT(&hadc3);
+  HAL_ADC_Start_DMA(&hadc3, (uint32_t*)current_meas_buf, 2);
+
   LCD_Init(&htim10);
   BMS_Init();
 
@@ -283,10 +305,10 @@ int main(void)
 	  process_voltages();
 	  process_temps();
 
-//	  if ((HAL_GetTick() - cell_disconnect_check_tickstart) > 1000) {
-//		  cell_disconnect_check(&hspi5, &htim10);
-//		  cell_disconnect_check_tickstart = HAL_GetTick();
-//	  }
+	  if ((HAL_GetTick() - cell_disconnect_check_tickstart) > 1000) {
+		  cell_disconnect_check(&hspi5, &htim10);
+		  cell_disconnect_check_tickstart = HAL_GetTick();
+	  }
 
 	  switch (bms_status) {
 		  case BMS_NORMAL:
@@ -310,6 +332,8 @@ int main(void)
 	  }
 
 	  if (bat_pack.HI_temp_c > 40) {
+		  enable_fans();
+
 		  // Set cooling fans to 40% duty cycle
 		  set_back_fans(0.4);
 		  set_side_fans(0.4);
@@ -318,6 +342,7 @@ int main(void)
 		  // Stop cooling fans
 		  set_back_fans(0);
 		  set_side_fans(0);
+		  disable_fans();
 	  }
 
 	  // Update SOC estimate
@@ -406,23 +431,29 @@ int main(void)
 	  update_display(&htim10);
 	  HAL_GPIO_TogglePin(Heartbeat_GPIO_Port, Heartbeat_Pin);
 
+	  // TODO: check if USB is plugged in when we get the hardware functionality
+	  // Send battery GUI data
+	  // Need to wait for previous UART transmission to complete if not already, but only allow 30 ms delay
+	  uint32_t timeout_tickstart = HAL_GetTick();
+	  uint8_t timed_out = 0;
+	  while(!UART_TxCplt && !timed_out) timed_out = (HAL_GetTick() - timeout_tickstart) > 30;
+	  if (!timed_out) uart_send_GUI_Data(&huart3);
+
+	  HAL_IWDG_Refresh(&hiwdg);
+
 	  if (charger_attached) {
 		  can_send_Charger();
 	  }
 	  else {
 		  can_send_PEI_Status(shutdown_flags);
 
-		  //can_send_BMS_Status();
+		  can_send_BMS_Status();
 		  can_send_BMS_Diagnostics();
 	  }
-
-	  uart_send_GUI_Data(&huart3);
-
-	  HAL_IWDG_Refresh(&hiwdg);
+  }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-  }
   /* USER CODE END 3 */
 }
 
@@ -554,15 +585,15 @@ static void MX_ADC3_Init(void)
   hadc3.Instance = ADC3;
   hadc3.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
   hadc3.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc3.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc3.Init.ScanConvMode = ADC_SCAN_ENABLE;
   hadc3.Init.ContinuousConvMode = DISABLE;
   hadc3.Init.DiscontinuousConvMode = DISABLE;
   hadc3.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING;
   hadc3.Init.ExternalTrigConv = ADC_EXTERNALTRIGCONV_T6_TRGO;
   hadc3.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc3.Init.NbrOfConversion = 1;
-  hadc3.Init.DMAContinuousRequests = DISABLE;
-  hadc3.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc3.Init.NbrOfConversion = 2;
+  hadc3.Init.DMAContinuousRequests = ENABLE;
+  hadc3.Init.EOCSelection = ADC_EOC_SEQ_CONV;
   if (HAL_ADC_Init(&hadc3) != HAL_OK)
   {
     Error_Handler();
@@ -577,9 +608,20 @@ static void MX_ADC3_Init(void)
   {
     Error_Handler();
   }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_8;
+  sConfig.Rank = ADC_REGULAR_RANK_2;
+  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc3, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE BEGIN ADC3_Init 2 */
 
   // Workaround for ADC missing external timer triggers: enable DAC clock
+  // Source: https://community.st.com/stm32-mcus-products-25/adc-trigger-with-timer-not-working-51318
   uint32_t* RCC_APB1ENR = (uint32_t*)(0x40023800 + 0x40);
   *RCC_APB1ENR |= 0x20000000; // set DAC_EN (bit 29)
 
@@ -743,6 +785,9 @@ static void MX_IWDG_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN IWDG_Init 2 */
+
+  uint32_t* DBGMCU_APB1_FZ = (uint32_t*)(0xE0042008);
+  *DBGMCU_APB1_FZ |= 0x00001000; // set DBG_IWDG_STOP to disable IWDG in debug mode
 
   /* USER CODE END IWDG_Init 2 */
 
@@ -982,8 +1027,7 @@ static void MX_USART3_UART_Init(void)
   huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart3.Init.OverSampling = UART_OVERSAMPLING_16;
   huart3.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart3.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_SWAP_INIT;
-  huart3.AdvancedInit.Swap = UART_ADVFEATURE_SWAP_ENABLE;
+  huart3.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
   if (HAL_UART_Init(&huart3) != HAL_OK)
   {
     Error_Handler();
@@ -991,6 +1035,26 @@ static void MX_USART3_UART_Init(void)
   /* USER CODE BEGIN USART3_Init 2 */
 
   /* USER CODE END USART3_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA2_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Stream3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream3_IRQn);
+  /* DMA2_Stream0_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
 
 }
 
@@ -1016,10 +1080,10 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOG_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOF, LCD_RS_Pin|SPI5_CS2_Pin|SPI5_CS_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOF, LCD_RS_Pin|SCF1_EN_Pin|SPI5_CS2_Pin|SPI5_CS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(Heartbeat_GPIO_Port, Heartbeat_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, Heartbeat_Pin|SCF2_EN_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOE, LCD_DB4_Pin|LCD_DB5_Pin|LCD_DB6_Pin|LCD_DB7_Pin, GPIO_PIN_RESET);
@@ -1040,19 +1104,19 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LCD_RS_Pin SPI5_CS2_Pin SPI5_CS_Pin */
-  GPIO_InitStruct.Pin = LCD_RS_Pin|SPI5_CS2_Pin|SPI5_CS_Pin;
+  /*Configure GPIO pins : LCD_RS_Pin SCF1_EN_Pin SPI5_CS2_Pin SPI5_CS_Pin */
+  GPIO_InitStruct.Pin = LCD_RS_Pin|SCF1_EN_Pin|SPI5_CS2_Pin|SPI5_CS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : Heartbeat_Pin */
-  GPIO_InitStruct.Pin = Heartbeat_Pin;
+  /*Configure GPIO pins : Heartbeat_Pin SCF2_EN_Pin */
+  GPIO_InitStruct.Pin = Heartbeat_Pin|SCF2_EN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(Heartbeat_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pins : LCD_DB4_Pin LCD_DB5_Pin LCD_DB6_Pin LCD_DB7_Pin */
   GPIO_InitStruct.Pin = LCD_DB4_Pin|LCD_DB5_Pin|LCD_DB6_Pin|LCD_DB7_Pin;
@@ -1145,6 +1209,8 @@ void MPU_Config(void)
   MPU_InitStruct.Size = MPU_REGION_SIZE_1MB;
   MPU_InitStruct.AccessPermission = MPU_REGION_NO_ACCESS;
   MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_ENABLE;
+  MPU_InitStruct.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
+  MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
 
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
   /* Enables the MPU */

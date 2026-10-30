@@ -5,6 +5,19 @@
 #include "main.h"
 #include "config.h"
 
+typedef struct {
+	uint32_t channel_number;
+	uint8_t flag;
+	uint16_t adc_value;
+} ADC_Channel_t;
+
+#define SHOCK_ANGLE1_CHANNEL ADC_CHANNEL_2
+#define SHOCK_ANGLE2_CHANNEL ADC_CHANNEL_7
+#define BRAKE_TEMP_CHANNEL ADC_CHANNEL_8
+
+#define NUM_ADC_CHANNELS 3
+extern volatile ADC_Channel_t adc_channels[NUM_ADC_CHANNELS];
+extern uint8_t wheel_speed_flag;
 
 // PUBLIC FUNCTION PROTOTYPES
 void TelemNode_Init();

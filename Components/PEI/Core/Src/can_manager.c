@@ -207,7 +207,6 @@ void can_send_BMS_Temps(uint8_t subpack_num, uint8_t group) {
 	tx_header.StdId = BMS_TEMPS_MSG_ID;
 	tx_header.DLC = 8;
 
-	// Convert temps to int, but add 3 decimals of precision by multiplying by 1000
 	uint8_t starting_cell = group * 3;
 	uint16_t temp1 = get_filtered_cell_temp(subpack_num, starting_cell) * 1000;
 	uint16_t temp2 = group < 5 ? get_filtered_cell_temp(subpack_num, starting_cell + 1) * 1000 : 0;
@@ -278,7 +277,7 @@ void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef* hcan_ptr) {
 	uint32_t id = rx1_header.StdId;
 	if (id == MC_VOLTAGE_MSG_ID) {
 		mc_voltage = CAN_RX1_BUFFER[1] << 8;
-		mc_voltage += CAN_RX1_BUFFER[0];
+		mc_voltage |= CAN_RX1_BUFFER[0];
 	}
 	else if (id == MC_STATE_MSG_ID) {
 		mc_vsm_state = CAN_RX1_BUFFER[0];
@@ -286,14 +285,14 @@ void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef* hcan_ptr) {
 	}
 	else if (id == MC_FAULT_MSG_ID) {
 		mc_post_faults = CAN_RX1_BUFFER[3] << 24;
-		mc_post_faults += CAN_RX1_BUFFER[2] << 16;
-		mc_post_faults += CAN_RX1_BUFFER[1] << 8;
-		mc_post_faults += CAN_RX1_BUFFER[0];
+		mc_post_faults |= CAN_RX1_BUFFER[2] << 16;
+		mc_post_faults |= CAN_RX1_BUFFER[1] << 8;
+		mc_post_faults |= CAN_RX1_BUFFER[0];
 
 		mc_run_faults = CAN_RX1_BUFFER[7] << 24;
-		mc_run_faults += CAN_RX1_BUFFER[6] << 16;
-		mc_run_faults += CAN_RX1_BUFFER[5] << 8;
-		mc_run_faults += CAN_RX1_BUFFER[4];
+		mc_run_faults |= CAN_RX1_BUFFER[6] << 16;
+		mc_run_faults |= CAN_RX1_BUFFER[5] << 8;
+		mc_run_faults |= CAN_RX1_BUFFER[4];
 	}
 }
 

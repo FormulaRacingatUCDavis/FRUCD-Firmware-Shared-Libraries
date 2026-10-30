@@ -11,24 +11,17 @@
 #include "cell_interface.h"
 #include "ADBMS6830.h"
 #include "utils.h"
-#include "can_manager.h"
 
 static const uint8_t ERROR_VOLTAGE_LIMIT = 4u;
 static const uint8_t ERROR_TEMPERATURE_LIMIT = 4u;
-static const uint8_t SPI_ERROR_LIMIT = 100u;
-static const uint32_t SPI_FAULT_REFRESH_THRESHOLD = 1000u;
-static const uint32_t VOLTAGE_FAULT_REFRESH_THRESHOLD = 5000u;
+static const uint8_t SPI_ERROR_LIMIT = 50u;
 
 static uint8_t is_first_run_temp = 1;
-static uint8_t is_first_run_volt = 1;
 static float temp_smoothing_factor = 0;
-static float volt_smoothing_factor = 0;
 
 uint8_t max_fault_addr;
 uint8_t max_faults;
 int8_t comm_bk_id = -1;
-uint32_t spi_fault_refresh_tickstart = 0;
-uint32_t voltage_fault_refresh_tickstart = 0;
 
 volatile BAT_PACK_t bat_pack;
 
@@ -39,6 +32,7 @@ static void pack_init() {
 		for (uint8_t cell = 0; cell < CELLS_PER_SUBPACK; cell++) {
 			bat_pack.subpacks[subpack].cells[cell].voltage_raw = 0;
 			bat_pack.subpacks[subpack].cells[cell].voltage = 0;
+			bat_pack.subpacks[subpack].cells[cell].filt_voltage = 0;
 
 			for (uint8_t i = 0; i < 4; i++) {
 				bat_pack.subpacks[subpack].cells[cell].bad_counters[i] = 0;
@@ -53,6 +47,9 @@ static void pack_init() {
 				bat_pack.subpacks[subpack].cell_temps[temp].bad_counters[i] = 0;
 			}
 		}
+
+		bat_pack.subpacks[subpack].filt_subpack_voltage = 0;
+		bat_pack.subpacks[subpack].filt_subpack_balance = 0;
 	}
 
 	// Initialize pack values
@@ -77,20 +74,12 @@ void cell_interface_init(SPI_HandleTypeDef* const hspi_ptr, TIM_HandleTypeDef* c
 	pack_init();
 }
 
-void set_voltage(uint8_t subpack_num, uint8_t cell_num, int16_t voltage_raw) {
+void set_voltage(uint8_t subpack_num, uint8_t cell_num, int16_t voltage_raw, int16_t filt_voltage_raw) {
 	if (voltage_raw != 0) {
 		bat_pack.subpacks[subpack_num].cells[cell_num].voltage_raw = voltage_raw;
 
-		float voltage = (voltage_raw * 0.00015) + 1.5;
-		bat_pack.subpacks[subpack_num].cells[cell_num].voltage = voltage;
-
-		if (is_first_run_volt) bat_pack.subpacks[subpack_num].cells[cell_num].filt_voltage = voltage;
-		else {
-			float prev_filt_voltage = bat_pack.subpacks[subpack_num].cells[cell_num].filt_voltage;
-			float filt_voltage = (volt_smoothing_factor * voltage) + ((1 - volt_smoothing_factor) * prev_filt_voltage);
-
-			bat_pack.subpacks[subpack_num].cells[cell_num].filt_voltage = filt_voltage;
-		}
+		bat_pack.subpacks[subpack_num].cells[cell_num].voltage = (voltage_raw * 0.00015) + 1.5;
+		bat_pack.subpacks[subpack_num].cells[cell_num].filt_voltage = (filt_voltage_raw * 0.00015) + 1.5;
 	}
 }
 
@@ -138,20 +127,8 @@ static void update_spi_errors(SPI_HandleTypeDef* const hspi_ptr,
 	static uint8_t comm_bk_present = 0;
 	static uint8_t comm_bk_enabled = 0;
 
-	uint8_t refresh = 0;
-
-	if ((HAL_GetTick() - spi_fault_refresh_tickstart) > SPI_FAULT_REFRESH_THRESHOLD) {
-		can_send_BMS_Status();
-
-		refresh = 1;
-		spi_fault_refresh_tickstart = HAL_GetTick();
-	}
-	else {
-		refresh = 0;
-	}
-
 	for (uint8_t ic = 0; ic < N_OF_ADBMS; ic++) {
-		bat_pack.spi_error_counters[ic] = refresh ? 0 : bat_pack.spi_error_counters[ic] + spi_errors[ic];
+		bat_pack.spi_error_counters[ic] += spi_errors[ic];
 		if (bat_pack.spi_error_counters[ic] > SPI_ERROR_LIMIT) {
 			bat_pack.status |= SPI_FAULT;
 			bat_pack.spi_fault_addresses |= 0x01 << ic;
@@ -209,22 +186,16 @@ static void aggregate_spi_errors(uint8_t spi_error_matrix[4][N_OF_ADBMS],
 }
 
 void update_voltages(SPI_HandleTypeDef* const hspi_ptr, TIM_HandleTypeDef* const htim_ptr) {
-	static uint32_t prev_volt_meas_tick = 0;
 
 	int16_t cell_voltages[N_OF_ADBMS][CELLS_PER_ADBMS];
+	int16_t filt_cell_voltages[N_OF_ADBMS][CELLS_PER_ADBMS];
 	uint8_t spi_errors[N_OF_ADBMS];
 
-	ADBMS6830_rdfc_all(hspi_ptr, htim_ptr, cell_voltages, spi_errors);
+	ADBMS6830_rdcv_all(hspi_ptr, htim_ptr, cell_voltages, spi_errors);
 	update_spi_errors(hspi_ptr, htim_ptr, spi_errors);
 
-	if (is_first_run_volt) prev_volt_meas_tick = HAL_GetTick();
-	else {
-		float volt_sampling_period = (HAL_GetTick() - prev_volt_meas_tick) / 1000.0;
-		prev_volt_meas_tick = HAL_GetTick();
-
-		// dynamically calculate smoothing factor for digital LPF with cutoff at 2 Hz
-		volt_smoothing_factor = 1 - exp(-1 * volt_sampling_period / 0.0796);
-	}
+	ADBMS6830_rdfc_all(hspi_ptr, htim_ptr, filt_cell_voltages, spi_errors);
+	update_spi_errors(hspi_ptr, htim_ptr, spi_errors);
 
 	for (uint8_t ic = 0; ic < N_OF_ADBMS; ic++) {
 		// Move voltages into bat_pack if no SPI error
@@ -232,13 +203,11 @@ void update_voltages(SPI_HandleTypeDef* const hspi_ptr, TIM_HandleTypeDef* const
 			for (uint8_t cell = 0; cell < CELLS_PER_ADBMS; cell++) {
 				set_voltage(ic / IC_PER_SUBPACK,
 							((ic % IC_PER_SUBPACK) * CELLS_PER_ADBMS) + cell,
-							cell_voltages[ic][cell]
+							cell_voltages[ic][cell], filt_cell_voltages[ic][cell]
 							);
 			}
 		}
 	}
-
-	if (is_first_run_volt) is_first_run_volt = 0;
 }
 
 void update_temps(SPI_HandleTypeDef* const hspi_ptr, TIM_HandleTypeDef* const htim_ptr) {
@@ -361,11 +330,11 @@ void cell_disconnect_check(SPI_HandleTypeDef* const hspi_ptr, TIM_HandleTypeDef*
 					open_wire_voltage = (odd_open_wire_voltages[ic][cell] * 0.00015) + 1.5;
 				}
 
-//				bat_pack.subpacks[subpack].cells[subpack_cell_num].bad_counters[RD_FAIL] += mismatch_flags[ic][cell];
-//				if (bat_pack.subpacks[subpack].cells[subpack_cell_num].bad_counters[RD_FAIL]
-//					> ERROR_VOLTAGE_LIMIT) {
-//					bat_pack.status |= MISMATCH;
-//				}
+				bat_pack.subpacks[subpack].cells[subpack_cell_num].bad_counters[RD_FAIL] += mismatch_flags[ic][cell];
+				if (bat_pack.subpacks[subpack].cells[subpack_cell_num].bad_counters[RD_FAIL]
+					> ERROR_VOLTAGE_LIMIT) {
+					bat_pack.status |= MISMATCH;
+				}
 
 				if ((open_wire_voltage != 1.5) && (baseline_voltage != 1.5)) { // voltage is 1.5 V when raw ADC value is 0
 					float percent_difference = (open_wire_voltage - baseline_voltage) / baseline_voltage;
@@ -395,16 +364,6 @@ void process_voltages() {
 	int16_t min_voltage_raw = 0;
 	float pack_voltage = 0;
 	float filt_pack_voltage = 0;
-
-	if ((HAL_GetTick() - voltage_fault_refresh_tickstart) > VOLTAGE_FAULT_REFRESH_THRESHOLD) {
-		for (uint8_t subpack = 0; subpack < N_OF_SUBPACK; subpack++) {
-			for (uint8_t cell = 0; cell < CELLS_PER_SUBPACK; cell++) {
-				bat_pack.subpacks[subpack].cells[cell].bad_counters[OVERVOLT] = 0;
-				bat_pack.subpacks[subpack].cells[cell].bad_counters[UNDERVOLT] = 0;
-			}
-		}
-		voltage_fault_refresh_tickstart = HAL_GetTick();
-	}
 
 	// Check each cell
 	for (uint8_t subpack = 0; subpack < N_OF_SUBPACK; subpack++) {
@@ -486,19 +445,8 @@ void process_temps() {
 
 	float avg_temp_c = 0;
 	float max_temp_c = -TEMP_IGNORE_LIMIT;
-	int16_t max_temp_raw = 0;
 	float min_temp_c = TEMP_IGNORE_LIMIT;
 	uint8_t num_bad_temp = 0;
-
-	// Spoof bad temps
-	bat_pack.subpacks[2].cell_temps[0].temp_c = bat_pack.AVG_temp_c;
-	bat_pack.subpacks[2].cell_temps[1].temp_c = bat_pack.AVG_temp_c;
-	bat_pack.subpacks[2].cell_temps[2].temp_c = bat_pack.AVG_temp_c;
-	bat_pack.subpacks[2].cell_temps[3].temp_c = bat_pack.AVG_temp_c;
-	bat_pack.subpacks[2].cell_temps[4].temp_c = bat_pack.AVG_temp_c;
-	bat_pack.subpacks[2].cell_temps[5].temp_c = bat_pack.AVG_temp_c;
-	bat_pack.subpacks[2].cell_temps[6].temp_c = bat_pack.AVG_temp_c;
-	bat_pack.subpacks[2].cell_temps[7].temp_c = bat_pack.AVG_temp_c;
 
 	// Check each cell temp
 	for (uint8_t subpack = 0; subpack < N_OF_SUBPACK; subpack++) {

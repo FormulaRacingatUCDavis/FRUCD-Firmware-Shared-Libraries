@@ -14,12 +14,12 @@
 static const uint8_t WAKE_UP_DELAY_US = 10 * N_OF_ADBMS; // number of microseconds to wait after sending wake up signal
 
 // Default values for CFGA registers
-static const uint8_t CFGA0 = 0x81; // REFON enabled, C-ADC vs S-ADC comparison voltage threshold set to its default (8.1 mV)
+static const uint8_t CFGA0 = 0x82; // REFON enabled, C-ADC vs S-ADC comparison voltage threshold set to 9 mV
 static const uint8_t CFGA1 = 0x00;
 static const uint8_t CFGA2 = 0x80; // Soak time enabled for Aux GPIO
 static const uint8_t CFGA3 = 0xFF; // Pull-down resistor disabled for Aux GPIO 1-8
 static const uint8_t CFGA4 = 0x03; // Pull-down resistor disabled for Aux GPIO 9-10
-static const uint8_t CFGA5 = 0x01; // Set cell voltage ADC IIR filter corner frequency to 110 Hz
+static const uint8_t CFGA5 = 0x06; // Set cell voltage ADC IIR filter corner frequency to 1.25 Hz
 
 // Default values for CFGB registers
 static const uint8_t CFGB0 = 0x00;
@@ -162,77 +162,44 @@ static void single_spi_write(SPI_HandleTypeDef* const hspi_ptr, // Pointer to th
 							 uint8_t cmd[2],                    // Array of command bytes to be written on the SPI port
 							 uint8_t data[N_OF_ADBMS][6]        // 2D array storing data bytes for each IC (can be set to NULL if not a write command)
 							 ) {
-	uint8_t tx_len_main = 4; // 2 command bytes + 2 PEC bytes
-	uint8_t tx_len_aux = 4;
-	if (data != NULL) {
-		tx_len_main += (N_OF_ADBMS - 2) * 8; // For write commands, there will always be 8 bytes per IC (6 register bytes + 2 PEC bytes)
-		tx_len_aux += 16;
-	}
-	uint8_t tx_data_main[tx_len_main];
-	uint8_t tx_data_aux[tx_len_aux];
+	uint8_t tx_len = 4; // 2 command bytes + 2 PEC bytes
+	if (data != NULL) tx_len += N_OF_ADBMS * 8; // For write commands, there will always be 8 bytes per IC (6 register bytes + 2 PEC bytes)
+	uint8_t tx_data[tx_len];
 
-	tx_data_main[0] = cmd[0];
-	tx_data_main[1] = cmd[1];
-	tx_data_aux[0] = cmd[0];
-	tx_data_aux[1] = cmd[1];
+	tx_data[0] = cmd[0];
+	tx_data[1] = cmd[1];
 
 	uint16_t cmd_pec = cmd_pec_calc(cmd);
-	tx_data_main[2] = HI8(cmd_pec);
-	tx_data_main[3] = LO8(cmd_pec);
-	tx_data_aux[2] = HI8(cmd_pec);
-	tx_data_aux[3] = LO8(cmd_pec);
+	tx_data[2] = HI8(cmd_pec);
+	tx_data[3] = LO8(cmd_pec);
 
 	if (data != NULL) {
 		uint8_t idx = 4;
 
 		// Data written to last IC in the chain first and first IC in the chain last (see bus protocols in datasheet)
-		for (int8_t ic = N_OF_ADBMS - 3; ic >= 0; ic--) {
+		for (int8_t ic = N_OF_ADBMS - 1; ic >= 0; ic--) {
 			uint16_t data_pec;
 
 			for (uint8_t i = 0; i < 6; i++) {
-				tx_data_main[idx] = data[ic][i];
+				tx_data[idx] = data[ic][i];
 				idx++;
 			}
 
 			data_pec = data_pec_calc(data[ic], 0);
-			tx_data_main[idx] = HI8(data_pec);
-			tx_data_main[idx + 1] = LO8(data_pec);
-			idx += 2;
-		}
-
-		idx = 4;
-
-		for (int8_t ic = N_OF_ADBMS - 1; ic > N_OF_ADBMS - 3; ic--) {
-			uint16_t data_pec;
-
-			for (uint8_t i = 0; i < 6; i++) {
-				tx_data_aux[idx] = data[ic][i];
-				idx++;
-			}
-
-			data_pec = data_pec_calc(data[ic], 0);
-			tx_data_aux[idx] = HI8(data_pec);
-			tx_data_aux[idx + 1] = LO8(data_pec);
+			tx_data[idx] = HI8(data_pec);
+			tx_data[idx + 1] = LO8(data_pec);
 			idx += 2;
 		}
 	}
 
-	HAL_GPIO_WritePin(SPI5_CS_GPIO_Port, SPI5_CS_Pin, GPIO_PIN_RESET);
-	delay_500_ns(htim_ptr);
-
-	HAL_SPI_Transmit(hspi_ptr, tx_data_main, tx_len_main, 100);
-	delay_500_ns(htim_ptr);
-
-	HAL_GPIO_WritePin(SPI5_CS_GPIO_Port, SPI5_CS_Pin, GPIO_PIN_SET);
-
 	HAL_GPIO_WritePin(SPI5_CS2_GPIO_Port, SPI5_CS2_Pin, GPIO_PIN_RESET);
 	delay_500_ns(htim_ptr);
 
-	HAL_SPI_Transmit(hspi_ptr, tx_data_aux, tx_len_aux, 100);
+	HAL_SPI_Transmit(hspi_ptr, tx_data, tx_len, 100);
 	delay_500_ns(htim_ptr);
 
 	HAL_GPIO_WritePin(SPI5_CS2_GPIO_Port, SPI5_CS2_Pin, GPIO_PIN_SET);
-	delay_us(htim_ptr, 1);
+	delay_us(htim_ptr, 2);
 }
 
 // SPI write for when we are using transceivers in the forward and reverse directions
@@ -360,61 +327,30 @@ static uint8_t single_spi_write_read(SPI_HandleTypeDef* const hspi_ptr, // Point
 	tx_data[2] = HI8(cmd_pec);
 	tx_data[3] = LO8(cmd_pec);
 
-	uint8_t rx_len_main = (N_OF_ADBMS - 2) * 8; // 6 register bytes + 2 PEC bytes = 8 bytes per IC
-	uint8_t rx_data_flattened_main[rx_len_main]; // array to store data from all ICs
-	uint8_t rx_data_flattened_aux[16];
-
-	HAL_GPIO_WritePin(SPI5_CS_GPIO_Port, SPI5_CS_Pin, GPIO_PIN_RESET);
-	delay_500_ns(htim_ptr);
-
-	HAL_SPI_Transmit(hspi_ptr, tx_data, 4, 100);
-	HAL_SPI_Receive(hspi_ptr, rx_data_flattened_main, rx_len_main, 100);
-	delay_500_ns(htim_ptr);
-
-	HAL_GPIO_WritePin(SPI5_CS_GPIO_Port, SPI5_CS_Pin, GPIO_PIN_SET);
+	uint8_t rx_len = N_OF_ADBMS * 8; // 6 register bytes + 2 PEC bytes = 8 bytes per IC
+	uint8_t rx_data_flattened[rx_len]; // array to store data from all ICs
 
 	HAL_GPIO_WritePin(SPI5_CS2_GPIO_Port, SPI5_CS2_Pin, GPIO_PIN_RESET);
 	delay_500_ns(htim_ptr);
 
 	HAL_SPI_Transmit(hspi_ptr, tx_data, 4, 100);
-	HAL_SPI_Receive(hspi_ptr, rx_data_flattened_aux, 16, 100);
+	HAL_SPI_Receive(hspi_ptr, rx_data_flattened, rx_len, 100);
 	delay_500_ns(htim_ptr);
 
 	HAL_GPIO_WritePin(SPI5_CS2_GPIO_Port, SPI5_CS2_Pin, GPIO_PIN_SET);
-	delay_us(htim_ptr, 1);
+	delay_us(htim_ptr, 2);
 
 	// Package data (excluding PEC) into 2D array and process PECs
 	// Data read from first IC in the chain first and last IC in the chain last (see bus protocols in datasheet)
-	for (uint8_t ic = 0; ic < N_OF_ADBMS - 2; ic++) {
+	for (uint8_t ic = 0; ic < N_OF_ADBMS; ic++) {
 		for (uint8_t i = 0; i < 6; i++) {
-			rx_data[ic][i] = rx_data_flattened_main[(ic * 8) + i];
+			rx_data[ic][i] = rx_data_flattened[(ic * 8) + i];
 		}
 
 		uint16_t data_pec = data_pec_calc(rx_data[ic], cmd_counter[ic]);
-		uint16_t received_pec = (rx_data_flattened_main[(ic * 8) + 6] & 0x03) << 8;
-		received_pec += rx_data_flattened_main[(ic * 8) + 7];
-		uint8_t received_cmd_count = (rx_data_flattened_main[(ic * 8) + 6] & 0xFC) >> 2;
-
-		if (data_pec != received_pec) {
-			no_errors = 0;
-			pec_mismatches[ic] = 1;
-		}
-		else {
-			pec_mismatches[ic] = 0;
-		}
-
-		cmd_counter[ic] = received_cmd_count;
-	}
-
-	for (uint8_t ic = N_OF_ADBMS - 2; ic < N_OF_ADBMS; ic++) {
-		for (uint8_t i = 0; i < 6; i++) {
-			rx_data[ic][i] = rx_data_flattened_aux[((ic - (N_OF_ADBMS - 2)) * 8) + i];
-		}
-
-		uint16_t data_pec = data_pec_calc(rx_data[ic], cmd_counter[ic]);
-		uint16_t received_pec = (rx_data_flattened_aux[((ic - (N_OF_ADBMS - 2)) * 8) + 6] & 0x03) << 8;
-		received_pec += rx_data_flattened_aux[((ic - (N_OF_ADBMS - 2)) * 8) + 7];
-		uint8_t received_cmd_count = (rx_data_flattened_aux[((ic - (N_OF_ADBMS - 2)) * 8) + 6] & 0xFC) >> 2;
+		uint16_t received_pec = (rx_data_flattened[(ic * 8) + 6] & 0x03) << 8;
+		received_pec += rx_data_flattened[(ic * 8) + 7];
+		uint8_t received_cmd_count = (rx_data_flattened[(ic * 8) + 6] & 0xFC) >> 2;
 
 		if (data_pec != received_pec) {
 			no_errors = 0;
@@ -817,12 +753,12 @@ static void ADBMS6830_rdfc_reg(SPI_HandleTypeDef* const hspi_ptr, // Pointer to 
  @param[in] SPI_HandleTypeDef* hspi_ptr pointer to the SPI handle
  @param[in] TIM_HandleTypeDef* htim_ptr pointer to a timer handle
 
- @param[out] uint8_t voltages[N_OF_ADBMS][CELLS_PER_ADBMS] 2D array containing the voltages
+ @param[out] int16_t voltages[N_OF_ADBMS][CELLS_PER_ADBMS] 2D array containing the voltages
  @param[out] uint8_t spi_errors[N_OF_ADBMS] Array containing flags indicating which nodes had SPI errors
  */
 void ADBMS6830_rdfc_all(SPI_HandleTypeDef* const hspi_ptr,             // Pointer to the SPI handle
 						TIM_HandleTypeDef* const htim_ptr,             // Pointer to a timer handle
-						int16_t voltages[N_OF_ADBMS][CELLS_PER_ADBMS], // Input: 2D array containing voltages
+						int16_t filt_voltages[N_OF_ADBMS][CELLS_PER_ADBMS], // Input: 2D array containing voltages
 						uint8_t spi_errors[N_OF_ADBMS]                 // Input: Array containing flags indicating which nodes had SPI errors
 						)
 {
@@ -852,6 +788,98 @@ void ADBMS6830_rdfc_all(SPI_HandleTypeDef* const hspi_ptr,             // Pointe
 				for (uint8_t cell = 0; cell < CELL_IN_REG; cell++) {
 					int16_t parsed_voltage = (int16_t)((data[ic][(cell * 2) + 1] << 8) +
 														data[ic][cell * 2]);
+					filt_voltages[ic][(reg * CELL_IN_REG) + cell] = parsed_voltage;
+				}
+			}
+			else {
+				for (uint8_t cell = 0; cell < CELL_IN_REG; cell++) {
+					filt_voltages[ic][(reg * CELL_IN_REG) + cell] = 0;
+				}
+			}
+		}
+	}
+
+	// Wake up ICs if necessary
+	if (ADBMS6830_wakeup_necessary()) {
+		ADBMS6830_wakeup(hspi_ptr, htim_ptr);
+	}
+
+	ADBMS6830_unfreeze_results(hspi_ptr, htim_ptr);
+}
+
+/*
+ \brief Reads back un-filtered cell voltages from one register group for each IC
+
+ @param[in] SPI_HandleTypeDef* hspi_ptr pointer to the SPI handle
+ @param[in] TIM_HandleTypeDef* htim_ptr pointer to a timer handle
+ @param[in] RegGroup_t reg filtered cell voltage register group to read from
+
+ @param[out] uint8_t data[N_OF_ADBMS][6] 2D array containing the data read back (6 bytes per register)
+ @param[out] uint8_t spi_errors[N_OF_ADBMS] Array containing flags indicating which nodes had SPI errors
+*/
+static void ADBMS6830_rdcv_reg(SPI_HandleTypeDef* const hspi_ptr, // Pointer to the SPI handle
+							   TIM_HandleTypeDef* const htim_ptr, // Pointer to a timer handle
+							   RegGroup_t reg_num,                // Option: filtered cell voltage register group to read from
+							   uint8_t data[N_OF_ADBMS][6],       // Input: 2D array containing the data read back
+							   uint8_t spi_errors[N_OF_ADBMS]     // Input: Array containing flags indicating which nodes had SPI errors
+							   )
+{
+	uint8_t cmd[2];
+	cmd[0] = 0x00;
+	if (reg_num < 4) cmd[1] = 0x04 + (reg_num * 2);
+	else cmd[1] = 0x09 + ((reg_num - 4) * 2);
+
+	uint8_t num_tries = 0;
+	uint8_t try_again = 0;
+
+	do {
+		try_again = !spi_write_read(hspi_ptr, htim_ptr, cmd, data, spi_errors);
+
+		num_tries++;
+		if ((num_tries > 2) && try_again) return;
+	} while (try_again);
+}
+
+/*
+ \brief Reads back un-filtered cell voltages from all register groups from all ICs
+
+ @param[in] SPI_HandleTypeDef* hspi_ptr pointer to the SPI handle
+ @param[in] TIM_HandleTypeDef* htim_ptr pointer to a timer handle
+
+ @param[out] int16_t voltages[N_OF_ADBMS][CELLS_PER_ADBMS] 2D array containing the voltages
+ @param[out] uint8_t spi_errors[N_OF_ADBMS] Array containing flags indicating which nodes had SPI errors
+*/
+void ADBMS6830_rdcv_all(SPI_HandleTypeDef* const hspi_ptr,             // Pointer to the SPI handle
+						TIM_HandleTypeDef* const htim_ptr,             // Pointer to a timer handle
+						int16_t voltages[N_OF_ADBMS][CELLS_PER_ADBMS], // Input: 2D array containing voltages
+						uint8_t spi_errors[N_OF_ADBMS]                 // Input: Array containing flags indicating which nodes had SPI errors
+					    )
+{
+	const uint8_t CELL_IN_REG = 3u; // 6 bytes per register / 2 bytes per cell = 3 cell voltages per register
+
+	// Wake up ICs if necessary
+	if (ADBMS6830_wakeup_necessary()) {
+		ADBMS6830_wakeup(hspi_ptr, htim_ptr);
+	}
+
+	// Freeze all result registers for data coherence
+	ADBMS6830_freeze_results(hspi_ptr, htim_ptr);
+
+	for (uint8_t reg = 0; reg < 4; reg++) {
+
+		if (ADBMS6830_wakeup_necessary()) {
+			ADBMS6830_wakeup(hspi_ptr, htim_ptr);
+		}
+
+		uint8_t data[N_OF_ADBMS][6];
+		ADBMS6830_rdcv_reg(hspi_ptr, htim_ptr, reg, data, spi_errors);
+
+		// Parse voltages and package them into 2D array
+		for (uint8_t ic = 0; ic < N_OF_ADBMS; ic++) {
+			if (!spi_errors[ic]) {
+				for (uint8_t cell = 0; cell < CELL_IN_REG; cell++) {
+					int16_t parsed_voltage = (int16_t)((data[ic][(cell * 2) + 1] << 8) +
+														data[ic][cell * 2]);
 					voltages[ic][(reg * CELL_IN_REG) + cell] = parsed_voltage;
 				}
 			}
@@ -870,7 +898,6 @@ void ADBMS6830_rdfc_all(SPI_HandleTypeDef* const hspi_ptr,             // Pointe
 
 	ADBMS6830_unfreeze_results(hspi_ptr, htim_ptr);
 }
-
 /*
  \brief Reads back S voltages from one register group for each IC
 
@@ -910,7 +937,7 @@ static void ADBMS6830_rdsv_reg(SPI_HandleTypeDef* const hspi_ptr, // Pointer to 
  @param[in] SPI_HandleTypeDef* hspi_ptr pointer to the SPI handle
  @param[in] TIM_HandleTypeDef* htim_ptr pointer to a timer handle
 
- @param[out] uint8_t s_voltages[N_OF_ADBMS][CELLS_PER_ADBMS] 2D array containing the S voltages
+ @param[out] int16_t s_voltages[N_OF_ADBMS][CELLS_PER_ADBMS] 2D array containing the S voltages
  @param[out] uint8_t spi_errors[N_OF_ADBMS] Array containing flags indicating which nodes had SPI errors
  */
 void ADBMS6830_rdsv_all(SPI_HandleTypeDef* const hspi_ptr,               // Pointer to the SPI handle
