@@ -3,6 +3,7 @@
 #include "traction_control.h"
 #include "driver_input.h"
 #include "main.h"
+#include "frucd.h"
 
 volatile uint8_t mc_lockout;
 volatile uint8_t mc_enabled;
@@ -62,11 +63,23 @@ static void save_can_rx_data(CAN_RxHeaderTypeDef rxHeader, uint8_t rxData[]) {
 			bms_status = rxData[0];
 			break;
 		case DIAGNOSTIC_BMS_DATA:
+		{
+    		struct frucd_diagnostic_bms_data_t m;
+    			if (frucd_diagnostic_bms_data_unpack(&m, rxData, rxHeader.DLC) == 0) {
+       				PACK_TEMP    = m.pei_hi_temp;
+       				soc          = m.pei_soc;
+        			pack_voltage = m.pei_pack_voltage;
+    			}
+    			break;
+		}	
+
+		/*
 			PACK_TEMP = rxData[0];
 			soc = rxData[1];
 			pack_voltage = (rxData[2] << 8);
 			pack_voltage += rxData[3];
 			break;
+		*/
 		case PEI_STATUS_MSG:
 			shutdown_flags = rxData[0];
 			acc_current_adc = rxData[1] << 8;
