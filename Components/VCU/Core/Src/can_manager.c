@@ -59,9 +59,14 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 static void save_can_rx_data(CAN_RxHeaderTypeDef rxHeader, uint8_t rxData[]) {
     // gets message and updates values
 	switch (rxHeader.StdId) {
-		case BMS_STATUS_MSG:
-			bms_status = rxData[0];
+		case FRUCD_BMS_STATUS_FRAME_ID:
+		{
+			struct frucd_bms_status_t m;
+			if (frucd_bms_status_unpack(&m, rxData, rxHeader.DLC) == 0) {
+				bms_status = m.pei_bms_status;
+			}
 			break;
+		}
 		case DIAGNOSTIC_BMS_DATA:
 		{
     		struct frucd_diagnostic_bms_data_t m;
@@ -80,25 +85,23 @@ static void save_can_rx_data(CAN_RxHeaderTypeDef rxHeader, uint8_t rxData[]) {
 			pack_voltage += rxData[3];
 			break;
 		*/
-		case PEI_STATUS_MSG:
-			shutdown_flags = rxData[0];
-			acc_current_adc = rxData[1] << 8;
-			acc_current_adc += rxData[2];
-			acc_current_ref_adc = rxData[3] << 8;
-			acc_current_ref_adc += rxData[4];
-			break;
-		case MC_VOLTAGE_INFO:
-			static uint8_t mc_voltage_msg_counter = 0;
-			mc_voltage_msg_counter++;
-
-			capacitor_volt_x10 = (rxData[1] << 8); // upper bits
-			capacitor_volt_x10 += rxData[0]; // lower bits
-
-			if (mc_voltage_msg_counter >= 50) {
-				mc_voltage_msg_counter = 0;
+		case FRUCD_STATUS_FRAME_ID: // PEI status: shutdown circuit flags + current (PEI_STATUS_MSG)
+		{
+			struct frucd_status_t s;
+			if (frucd_status_unpack(&s, rxData, rxHeader.DLC) == 0) {
+				// rebuild the old flag byte so shutdown_closed() and the
+				// precharge/AIR check in main.c keep working unchanged
+				shutdown_flags = (s.pei_imd_ok         << 5)
+				               | (s.pei_bms_ok         << 4)
+				               | (s.pei_shutdown_final << 3)
+				               | (s.pei_air_neg        << 2)
+				               | (s.pei_air_pos        << 1)
+				               |  s.pei_precharge;
+				acc_current_adc     = s.pei_current_adc;
+				acc_current_ref_adc = (uint16_t)s.pei_current_reference; // DBC says signed, old code unsigned
 			}
-
 			break;
+		}
 		case MC_INTERNAL_STATES:
 			static uint8_t mc_int_state_msg_counter = 0;
 			mc_int_state_msg_counter++;
@@ -221,10 +224,14 @@ static void save_can_rx_data(CAN_RxHeaderTypeDef rxHeader, uint8_t rxData[]) {
 				if(power > max_power) max_power = power;
 			}
 			break;
-		case STRAIN_GAUGE_REAR:
-			sg_rear = rxData[0] << 8;
-			sg_rear += rxData[1];
+		case FRUCD_STRAIN_GAUGES_REAR_FRAME_ID:
+		{
+			struct frucd_strain_gauges_rear_t g;
+			if (frucd_strain_gauges_rear_unpack(&g, rxData, rxHeader.DLC) == 0) {
+				sg_rear = g.telem_node_rl_toe_strain_gauge; // old code only read bytes 0-1
+			}
 			break;
+		}
 		default:
 			// no valid input received
 			break;
@@ -238,31 +245,22 @@ static void save_can_rx_data(CAN_RxHeaderTypeDef rxHeader, uint8_t rxData[]) {
 static CAN_TxHeaderTypeDef   TxHeader;
 static uint32_t              TxMailbox;
 
-//  transmit state
+//  transmit state (0x766)
 void can_tx_vcu_state(CAN_HandleTypeDef *hcan){
-	static uint8_t vcu_state_msg_counter = 0;
-	vcu_state_msg_counter++;
-
-	TxHeader.IDE = CAN_ID_STD;
-	TxHeader.StdId = VEHICLE_STATE;
-	TxHeader.RTR = CAN_RTR_DATA;
-	TxHeader.DLC = 8;
-	uint16_t tick = (uint16_t)HAL_GetTick();
-	uint8_t data_tx_state[8] = {
-        is_hv_requested(),
-        throttle1.percent,
-        throttle2.percent,
-		brake.percent,
-        one_byte_state(),
-		(tick >> 8) & 0xFF,
-		tick & 0xFF
-    };
-
-	if (vcu_state_msg_counter >= 50) {
-		vcu_state_msg_counter = 0;
-	}
-
-    if (HAL_CAN_AddTxMessage(hcan, &TxHeader, data_tx_state, &TxMailbox) != HAL_OK)
+	struct frucd_vehicle_state_t m;
+	uint8_t data[FRUCD_VEHICLE_STATE_LENGTH];
+ 
+	frucd_vehicle_state_init(&m);
+	m.dashboard_hv_requested    = is_hv_requested();
+	m.dashboard_throttle1_level = throttle1.percent;
+	m.dashboard_throttle2_level = throttle2.percent;
+	m.dashboard_brake_level     = brake.percent;
+	m.dashboard_state           = one_byte_state();
+	m.dashboard_vcu_ticks       = (uint16_t)HAL_GetTick();
+ 
+	frucd_vehicle_state_pack(data, &m, sizeof(data));
+ 
+	if (CAN_Send(hcan, FRUCD_VEHICLE_STATE_FRAME_ID, data, FRUCD_VEHICLE_STATE_LENGTH) != HAL_OK)
 	{
 	  print("CAN Tx failed\r\n");
 	}
@@ -281,6 +279,8 @@ HAL_StatusTypeDef CAN_Send(CAN_HandleTypeDef *hcan, uint32_t id, uint8_t* data, 
 }
 
 //  transmit random shit for testing
+// NOT MIGRATED: DBC says 0x500 = strain gauge / front wheel speed / TC torque request,
+// but this sends torque %, launch param and the pressed button.
 void can_tx_sg(CAN_HandleTypeDef *hcan, uint16_t adc){
 	static uint8_t tc_sg_msg_counter = 0;
 	tc_sg_msg_counter++;
@@ -315,39 +315,21 @@ void can_tx_sg(CAN_HandleTypeDef *hcan, uint16_t adc){
 }
 
 
-// transmit torque request
+// transmit torque request (0x0C0), goes to the motor controller
 void can_tx_torque_request(CAN_HandleTypeDef *hcan){
-	static uint8_t torque_request_msg_counter = 0;
-	torque_request_msg_counter++;
-
-	TxHeader.IDE = CAN_ID_STD;
-	TxHeader.StdId = TORQUE_REQUEST;
-	TxHeader.RTR = CAN_RTR_DATA;
-	TxHeader.DLC = 8;
-
-    uint8_t byte5 = 0b010;   //speed mode | discharge_enable | inverter enable
-    int16_t throttle_msg_byte = 0;
-    if (state == DRIVE) {
-    	byte5 |= 0x01;  //set inverter enable bit
-    	throttle_msg_byte = requested_throttle();
-    }
-
-    uint8_t data_tx_torque[8] = {
-        (uint8_t)(throttle_msg_byte & 0xff), // 0 - torque command lower (Nm*10)
-        (uint8_t)(throttle_msg_byte >> 8) & 0xFF, // 1 - torque command upper (Nm*10)
-        0, // 2 - speed command lower (not applicable)
-        0, // 3 - speed command upper (not applicable)
-        0, // 4 - direction (1 = forward, 0 = backward)
-        byte5, // 5 - speed mode | discharge_enable | inverter enable
-        0, // 6 - torque limit lower (if 0, default EEPROM value used)
-        0 // 7 - torque limit upper (if 0, default EEPROM value used)
-    };
-
-    if (torque_request_msg_counter >= 2) {
-    	torque_request_msg_counter = 0;
-    }
-
-    if (HAL_CAN_AddTxMessage(hcan, &TxHeader, data_tx_torque, &TxMailbox) != HAL_OK)
+	struct frucd_torque_request_t m;
+	uint8_t data[FRUCD_TORQUE_REQUEST_LENGTH];
+ 
+	frucd_torque_request_init(&m);          // every field starts at 0
+	m.dashboard_discharge_enable = 1;       // old code: byte5 = 0b010
+	if (state == DRIVE) {
+		m.dashboard_inverter_enable = 1;    // old code: byte5 |= 0x01
+		m.dashboard_torque = requested_throttle();  // raw value = Nm * 10
+	}
+ 
+	frucd_torque_request_pack(data, &m, sizeof(data));
+ 
+	if (CAN_Send(hcan, FRUCD_TORQUE_REQUEST_FRAME_ID, data, FRUCD_TORQUE_REQUEST_LENGTH) != HAL_OK)
 	{
 	  print("CAN Tx failed\r\n");
 	}
@@ -368,6 +350,7 @@ void can_tx_disable_MC(CAN_HandleTypeDef *hcan) {
 	}
 }
 
+// NOT MIGRATED: MC_PARAM_COMMAND is a motor controller message, not in the DBC
 void can_clear_MC_fault(CAN_HandleTypeDef *hcan) {
 	TxHeader.IDE = CAN_ID_STD;
 	TxHeader.StdId = MC_PARAM_COMMAND;
@@ -392,6 +375,10 @@ void can_clear_MC_fault(CAN_HandleTypeDef *hcan) {
 	}
 }
 
+// NOT MIGRATED (yet): the DBC's 0x501 "Inputs" layout does not match what this sends
+// (display mode bits overlap marker/overtake, debug button and knob order differ,
+// DBC length is 3 but this sends 8). The dashboard/Pi side must change together
+// with this, so get the team to agree on the layout first.
 void can_tx_buttons_and_knobs(CAN_HandleTypeDef *hcan) {
 //	uint16_t torque_limit_raw = (uint16_t)(torque_percentage / 100 * 4095);
 //	uint16_t launch_control_param_raw = (uint16_t)(launch_control_param / 100 * 4095);
@@ -413,58 +400,44 @@ void can_tx_buttons_and_knobs(CAN_HandleTypeDef *hcan) {
 		CAN_Send(hcan, 0x501, data, 8);
 }
 
+// raw pedal ADC values (0x502)
 void can_tx_pedals_raw(CAN_HandleTypeDef *hcan) {
-	TxHeader.IDE = CAN_ID_STD;
-	TxHeader.StdId = PEDALS_RAW;
-	TxHeader.RTR = CAN_RTR_DATA;
-	TxHeader.DLC = 8;
-
-	uint8_t data[8] = {
-			throttle1.raw >> 8,
-			throttle1.raw & 0xFF,
-			throttle2.raw >> 8,
-			throttle2.raw & 0xFF,
-			brake1.raw >> 8,
-			brake1.raw & 0xFF,
-			brake2.raw >> 8,
-			brake2.raw & 0xFF
-	};
-
-	if (HAL_CAN_AddTxMessage(hcan, &TxHeader, data, &TxMailbox) != HAL_OK)
+	struct frucd_raw_pedals_t m;
+	uint8_t data[FRUCD_RAW_PEDALS_LENGTH];
+ 
+	m.dashboard_throttle_1 = throttle1.raw;
+	m.dashboard_throttle_2 = throttle2.raw;
+	m.dashboard_brake_1    = brake1.raw;
+	m.dashboard_brake_2    = brake2.raw;
+ 
+	frucd_raw_pedals_pack(data, &m, sizeof(data));
+ 
+	if (CAN_Send(hcan, FRUCD_RAW_PEDALS_FRAME_ID, data, FRUCD_RAW_PEDALS_LENGTH) != HAL_OK)
 	{
 	  print("CAN Tx failed\r\n");
 	}
 }
 
+// motor + accumulator power (0x504)
 void can_tx_power(CAN_HandleTypeDef *hcan) {
-	TxHeader.IDE = CAN_ID_STD;
-	TxHeader.StdId = MC_AC_POWER;
-	TxHeader.RTR = CAN_RTR_DATA;
-	TxHeader.DLC = 8;
-
 	float acc_current_amps = mvolts_to_amps(raw_to_mvolts(acc_current_adc), raw_to_mvolts(acc_current_ref_adc));
 	float acc_voltage_volt = pack_voltage * 0.018 + 180;
-
+ 
 	float acc_power = acc_current_amps*acc_voltage_volt;
-
+ 
 	int32_t motor_power = requested_throttle() / 10 * motor_speed * 0.10472; // 0.10472 = RADS_PER_RPM (conversion)
-
-	int8_t data[8] = {
-			(motor_power >> 24) & 0xFF,
-			(motor_power >> 16) & 0xFF,
-			(motor_power >> 8) & 0xFF,
-			motor_power & 0xFF,
-			(((int32_t)acc_power) >> 24) & 0xFF,
-			(((int32_t)acc_power) >> 16) & 0xFF,
-			(((int32_t)acc_power) >> 8) & 0xFF,
-			((int32_t)acc_power) & 0xFF,
-	};
-
-	// cast to uint8* to avoid compiler warning, underlying bit pattern should stay the same
-	if (HAL_CAN_AddTxMessage(hcan, &TxHeader, (uint8_t*)data, &TxMailbox) != HAL_OK)
+ 
+	struct frucd_mcac_power_t m;
+	uint8_t data[FRUCD_MCAC_POWER_LENGTH];
+ 
+	m.motor_power = motor_power;
+	m.acc_power   = (int32_t)acc_power;
+ 
+	frucd_mcac_power_pack(data, &m, sizeof(data));
+ 
+	if (CAN_Send(hcan, FRUCD_MCAC_POWER_FRAME_ID, data, FRUCD_MCAC_POWER_LENGTH) != HAL_OK)
 	{
 	  print("CAN Tx failed\r\n");
-	}	
+	}
 }
-
 
