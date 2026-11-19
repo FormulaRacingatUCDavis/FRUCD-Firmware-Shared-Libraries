@@ -215,7 +215,7 @@ int16_t requested_throttle(){
 
     if (POWER_SMOOTHING_ENABLED) {
     	if (smoothing_flag == SMOOTHING_STATE_DOWN) { // if we are in the smoothing down sequence
-			// usually: will go from 60kW max power to 50kW max power over the course of a few seconds
+			// usually: will go from 70kW max power to 60kW max power over the course of a few seconds
 
 			uint32_t interval_ms = HAL_GetTick() - smoothing_start_tick;
 
@@ -228,7 +228,7 @@ int16_t requested_throttle(){
 			}
 
 		} else if (smoothing_flag == SMOOTHING_STATE_UP) { // else, we are in the smoothing up sequence
-			// usually: will go from 50kW max power back up to 60kW max power
+			// usually: will go from 60kW max power back up to 70kW max power
 
 			uint32_t interval_ms = HAL_GetTick() - smoothing_start_tick;
 

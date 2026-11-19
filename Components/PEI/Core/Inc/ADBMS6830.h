@@ -121,6 +121,10 @@ void ADBMS6830_rdfc_all(SPI_HandleTypeDef* const hspi_ptr,
 						 TIM_HandleTypeDef* const htim_ptr,
 						 int16_t voltages[N_OF_ADBMS][CELLS_PER_ADBMS],
 						 uint8_t spi_errors[N_OF_ADBMS]);
+void ADBMS6830_rdcv_all(SPI_HandleTypeDef* const hspi_ptr,
+						 TIM_HandleTypeDef* const htim_ptr,
+						 int16_t voltages[N_OF_ADBMS][CELLS_PER_ADBMS],
+						 uint8_t spi_errors[N_OF_ADBMS]);
 void ADBMS6830_rdsv_all(SPI_HandleTypeDef* const hspi_ptr,
 						 TIM_HandleTypeDef* const htim_ptr,
 						 int16_t s_voltages[N_OF_ADBMS][CELLS_PER_ADBMS],

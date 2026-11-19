@@ -15,7 +15,7 @@ void WheelSpeed_Init(WheelSpeed_t* ws, TIM_HandleTypeDef* tm)
 	ws->last_tick = HAL_GetTick();
 	ws->tim = tm;
 }
-// Hello
+
 uint32_t WheelSpeed_GetCPS(WheelSpeed_t* ws)
 {
 	uint32_t tick = HAL_GetTick();

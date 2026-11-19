@@ -65,12 +65,16 @@ void Error_Handler(void);
 #define Wake2_6822_GPIO_Port GPIOE
 #define LCD_RS_Pin GPIO_PIN_0
 #define LCD_RS_GPIO_Port GPIOF
+#define SCF1_EN_Pin GPIO_PIN_4
+#define SCF1_EN_GPIO_Port GPIOF
 #define SPI5_CS2_Pin GPIO_PIN_5
 #define SPI5_CS2_GPIO_Port GPIOF
 #define SPI5_CS_Pin GPIO_PIN_6
 #define SPI5_CS_GPIO_Port GPIOF
 #define Heartbeat_Pin GPIO_PIN_3
 #define Heartbeat_GPIO_Port GPIOA
+#define SCF2_EN_Pin GPIO_PIN_6
+#define SCF2_EN_GPIO_Port GPIOA
 #define LCD_DB4_Pin GPIO_PIN_7
 #define LCD_DB4_GPIO_Port GPIOE
 #define LCD_DB5_Pin GPIO_PIN_8

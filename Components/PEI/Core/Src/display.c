@@ -117,7 +117,7 @@ void update_display(TIM_HandleTypeDef* const htim_ptr) {
 		LCD_PrintString(htim_ptr, str);
 
 		LCD_Position(htim_ptr, 1, 10);
-		sprintf(str, "%dA ", (int8_t)bat_pack.current);
+		sprintf(str, "%dA   ", (int8_t)bat_pack.current);
 		LCD_PrintString(htim_ptr, str);
 	}
 }
