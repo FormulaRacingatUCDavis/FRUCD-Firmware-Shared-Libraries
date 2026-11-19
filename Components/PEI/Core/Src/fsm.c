@@ -64,7 +64,7 @@ uint8_t hv_allowed() {
 		return 1;
 	}
 	else if (charger_attached) {
-		if (pei_status & CHARGER_FAULT) return 0;
+		if (pei_status & (CHARGER_FAULT | CHARGER_TIMEOUT | SHUTDOWN)) return 0;
 
 		return 1;
 	}
@@ -105,12 +105,13 @@ void update_status() {
 		if (ticks_since_mc_message > CAN_TIMEOUT_TICK_COUNT) add_status(MC_TIMEOUT);
 		if (((mc_post_faults != MC_HW_GATE_POST_FAULT) && mc_post_faults) ||
 			((mc_run_faults != MC_HW_GATE_RUN_FAULT) && mc_run_faults)) add_status(MC_FAULT);
-		if (mc_discharge_state == DISCHARGE_ACTIVE) add_status(MC_DISCHARGING);
-	}
-
+		if (mc_discharge_state == DISCHARGE_ACTIVE) add_status(MC_DISCHARGING); 
 	if (charger_attached) {
 		if (ticks_since_charger_message > CAN_TIMEOUT_TICK_COUNT) add_status(CHARGER_TIMEOUT);
-		if ((charger_status & 0b10111) != 0) add_status(CHARGER_FAULT); // check charger fault bits
+		if ((charger_status & 0b11111) != 0) add_status(CHARGER_FAULT); // check charger fault bits
+		//checks for bit 3, instead of 0b10111 chaned to 0b11111
+	}
+
 	}
 
 	if (!HAL_GPIO_ReadPin(SDC_Final_GPIO_Port, SDC_Final_Pin)) add_status(SHUTDOWN); // shutdown circuit open

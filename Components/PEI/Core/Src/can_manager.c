@@ -7,10 +7,12 @@
 
 
 #include "can_manager.h"
+#include "main.h"
 #include "cell_interface.h"
 #include "charger.h"
 #include "fsm.h"
 #include "utils.h"
+#include "frucd.h"
 
 extern CAN_HandleTypeDef hcan1;
 extern CAN_HandleTypeDef hcan2;
@@ -40,7 +42,23 @@ extern int8_t comm_bk_id;
 
 volatile uint32_t vcu_tickstart = 0;
 volatile uint32_t mc_tickstart = 0;
-volatile uint32_t charger_tickstart = 0;
+volatile uint32_t charger_tickstart = 0; 
+
+static void can_send_std(CAN_HandleTypeDef *hcan, uint32_t frame_id, const uint8_t *data, int dlc) {
+    if (dlc < 0) {
+        return; // Pack failed (e.g., -EINVAL)
+    }
+
+    CAN_TxHeaderTypeDef tx_header = {
+        .StdId = frame_id,
+        .IDE = CAN_ID_STD,
+        .RTR = CAN_RTR_DATA,
+        .DLC = (uint32_t)dlc,
+    };
+
+    uint32_t tx_mailbox;
+    HAL_CAN_AddTxMessage(hcan, &tx_header, (uint8_t *)data, &tx_mailbox);
+}
 
 static void set_tx_header_defaults(CAN_TxHeaderTypeDef* const tx_header_ptr) {
 	tx_header_ptr->IDE = CAN_ID_STD;
@@ -226,47 +244,57 @@ void can_send_BMS_Temps(uint8_t subpack_num, uint8_t group) {
 	HAL_CAN_AddTxMessage(&hcan2, &tx_header, tx_data, &BMS_TEMPS_TX_MAILBOX);
 }
 
-void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* hcan_ptr) {
+//This is the refactored FIFO 0 callback for PEI 
+//eliminates the confusion between Little Endian and Big Endian bit shifting by getting rid of manual bit shifting in place of using cantools 
+//allocates DBC struct onto call stack instead of allocating hcan1 and hcan2 to the same CAN_Rx interrupt 
+//new DBC call stack will save can1 to stack frame A, then can2 to stack frame b if can2 interrupt happens when can1 is in progress, letting can1 finish cleanly before can2 goes from stack B to A and finishes 
+//this prevents overriting on the bus, as hcan1 and hcan2 use the same interrupt 
 
-	static CAN_RxHeaderTypeDef rx0_header;
-	static uint8_t CAN_RX0_BUFFER[8];
-	HAL_CAN_GetRxMessage(hcan_ptr, CAN_RX_FIFO0, &rx0_header, CAN_RX0_BUFFER);
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* hcan_ptr){
+	CAN_RxHeaderTypeDef rx0_header;
+	uint8_t rx_data[8];
+	HAL_CAN_GetRxMessage(hcan_ptr, CAN_RX_FIFO0, &rx0_header, rx_data);
 
-	if (hcan_ptr == &hcan1) {
-		vcu_tickstart = HAL_GetTick();
-		ticks_since_vcu_message = 0;
-		vcu_attached = 1;
+	if(hcan_ptr == &hcan1){
+		if(rx0_header.IDE == CAN_ID_STD && rx0_header.StdID == FRUCD_VEHICLE_STATE_FRAME_ID){
+			struct frucd_vehicle_state_t vcu_msg;
+			if(frucd_vehicle_state_unpack(&vcu_msg, rx_data, rx0_header.DLC) == 0){
+				vcu_tickstart = HAL_GetTick();
+				ticks_since_vcu_message = 0;
+				vcu_attached = 1;
 
-		hv_requested = CAN_RX0_BUFFER[0];
-		vcu_state = CAN_RX0_BUFFER[4];
+				hv_requested = vcu_msg.dashboard_hv_requested;
+				vcu_state = vcu_msg.dashboard_state;
 
-		bat_pack.status &= ~CHARGEMODE;
+				bat_pack.status &= ~CHARGEMODE;
+			}
+		}
+		else if(hcan_ptr == &hcan2){
+			if(rx0_header.DLC >= 5){
+				charger_tickstart = HAL_GetTick();
+				ticks_since_charger_message = 0;
+				charger_attached = 1;
+
+				bat_pack.status |= CHARGEMODE;
+
+				charger_status = rx_data[4];
+				if((charger_status & 0b1111) == 0){ //no faults, charger active  
+					vcu_state = CHARGING;
+				}
+				else if((charger_status & 0b1011) == 0){ //no faults, charger inactive
+					vcu_state = LV;
+				}
+				else{
+					//charger faults, handled in fsm.c
+				}
+			}
+		}
 	}
-	else if (hcan_ptr == &hcan2) {
-		charger_tickstart = HAL_GetTick();
-		ticks_since_charger_message = 0;
-		charger_attached = 1;
-
-		bat_pack.status |= CHARGEMODE;
-
-		charger_status = CAN_RX0_BUFFER[4];
-		if ((charger_status & 0b1111) == 0) { // no faults, charger active
-			vcu_state = CHARGING;
-		}
-		else if ((charger_status & 0b1011) == 0) { // no faults, charger inactive
-			vcu_state = LV;
-		}
-		else {
-			// Charger faults, handled in fsm.c
-		}
-	}
-}
 
 void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef* hcan_ptr) {
-
-	static CAN_RxHeaderTypeDef rx1_header;
-	static uint8_t CAN_RX1_BUFFER[8];
-	HAL_CAN_GetRxMessage(hcan_ptr, CAN_RX_FIFO1, &rx1_header, CAN_RX1_BUFFER);
+	CAN_RxHeaderTypeDef rx1_header;
+	uint8_t rx_data[8];
+	HAL_CAN_GetRxMessage(hcan_ptr, CAN_RX_FIFO1, &rx1_header, rx_data);
 
 	const uint32_t MC_VOLTAGE_MSG_ID = 0x0A7;
 	const uint32_t MC_STATE_MSG_ID = 0x0AA;
@@ -277,23 +305,28 @@ void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef* hcan_ptr) {
 
 	uint32_t id = rx1_header.StdId;
 	if (id == MC_VOLTAGE_MSG_ID) {
-		mc_voltage = CAN_RX1_BUFFER[1] << 8;
-		mc_voltage += CAN_RX1_BUFFER[0];
+		if (rx1_header.DLC >= 2) {
+			mc_voltage = (int16_t)((rx_data[1] << 8) | rx_data[0]);
+		}
 	}
 	else if (id == MC_STATE_MSG_ID) {
-		mc_vsm_state = CAN_RX1_BUFFER[0];
-		mc_discharge_state = (CAN_RX1_BUFFER[4] >> 5) & 0x07; // bits 5-7
+		if (rx1_header.DLC >= 5) {
+			mc_vsm_state = rx_data[0];
+			mc_discharge_state = (rx_data[4] >> 5) & 0x07;
+		}
 	}
 	else if (id == MC_FAULT_MSG_ID) {
-		mc_post_faults = CAN_RX1_BUFFER[3] << 24;
-		mc_post_faults += CAN_RX1_BUFFER[2] << 16;
-		mc_post_faults += CAN_RX1_BUFFER[1] << 8;
-		mc_post_faults += CAN_RX1_BUFFER[0];
+		if (rx1_header.DLC >= 8) {
+			mc_post_faults = ((uint32_t)rx_data[3] << 24) |
+			                 ((uint32_t)rx_data[2] << 16) |
+			                 ((uint32_t)rx_data[1] << 8)  |
+			                 ((uint32_t)rx_data[0]);
 
-		mc_run_faults = CAN_RX1_BUFFER[7] << 24;
-		mc_run_faults += CAN_RX1_BUFFER[6] << 16;
-		mc_run_faults += CAN_RX1_BUFFER[5] << 8;
-		mc_run_faults += CAN_RX1_BUFFER[4];
+			mc_run_faults = ((uint32_t)rx_data[7] << 24) |
+			                ((uint32_t)rx_data[6] << 16) |
+			                ((uint32_t)rx_data[5] << 8)  |
+			                ((uint32_t)rx_data[4]);
+		}
 	}
 }
 
