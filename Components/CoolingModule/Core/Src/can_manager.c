@@ -7,6 +7,9 @@
 
 #include "can_manager.h"
 #include "main.h"
+#include "frucd.h"
+// Previously: no frucd.h include. Added so this file can use the shared CAN library
+// (structs, unpack functions and FRAME_ID constants generated from FRUCD.dbc).
 
 #include <stdio.h>
 
@@ -71,9 +74,20 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* hcan_ptr)
 	switch(can_rx_header.StdId)
 	{
 	// PCAN
-		case VEHICLE_STATE:
-			can_data.vcu_state = can_rx_data[4];
+		case FRUCD_VEHICLE_STATE_FRAME_ID:
+		{
+			struct frucd_vehicle_state_t m;
+			if (frucd_vehicle_state_unpack(&m, can_rx_data, can_rx_header.DLC) == 0) {
+				can_data.vcu_state = m.dashboard_state;
+			}
 			break;
+		}
+		// Previously:
+		//   case VEHICLE_STATE:
+		//       can_data.vcu_state = can_rx_data[4];
+		//       break;
+		// Byte 4 is the Dashboard_State signal in the DBC (start bit 39, 8 bits).
+		// The unpack function now reads it for us; same ID (0x766), same value.
 		case BMS_STATUS_MSG:
 			can_data.bms_temp = can_rx_data[0];
 			break;
@@ -99,9 +113,20 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* hcan_ptr)
 			can_data.motor_temp = (can_rx_data[5] << 8);
 			can_data.motor_temp |= can_rx_data[4];
 			break;
-		case TORQUE_REQUEST:
-			can_data.inverter_enable = can_rx_data[5] & 0x01;
+		case FRUCD_TORQUE_REQUEST_FRAME_ID:
+		{
+			struct frucd_torque_request_t m;
+			if (frucd_torque_request_unpack(&m, can_rx_data, can_rx_header.DLC) == 0) {
+				can_data.inverter_enable = m.dashboard_inverter_enable;
+			}
 			break;
+		}
+		// Previously:
+		//   case TORQUE_REQUEST:
+		//       can_data.inverter_enable = can_rx_data[5] & 0x01;
+		//       break;
+		// Bit 0 of byte 5 is Dashboard_Inverter_Enable in the DBC (start bit 40, 1 bit,
+		// little-endian). The "& 0x01" mask is now done inside the unpack function.
 		case PUMP_PWM:
 			// 1 means override to use hardcoded value, 0 means we can use our own algoritm for PWM values
 			if (can_rx_data[0] == 1) {
