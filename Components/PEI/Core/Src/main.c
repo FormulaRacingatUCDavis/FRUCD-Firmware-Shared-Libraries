@@ -22,7 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdint.h>
-
+#include "frucd.h"
 #include "fsm.h"
 #include "cell_interface.h"
 #include "can_manager.h"
@@ -287,7 +287,7 @@ int main(void)
   LCD_Init(&htim10);
   BMS_Init();
 
-  uint8_t shutdown_flags = 0;
+  struct frucd_status_t pei_status_msg = {0}; //removed manual bit shifting and masking, replaced with frucd_status_t struct
 
   BMS_MODE_t bms_status = BMS_NORMAL;
   uint32_t cell_disconnect_check_tickstart = HAL_GetTick();
@@ -355,10 +355,13 @@ int main(void)
 
 	  charge_control = CHARGE_STOP;
 
-	  shutdown_flags = relay_flags & 0x07;
-	  if (!HAL_GPIO_ReadPin(IMD_Fault_GPIO_Port, IMD_Fault_Pin)) shutdown_flags |= (1 << 5);
-	  if (!HAL_GPIO_ReadPin(BMS_Fault_GPIO_Port, BMS_Fault_Pin)) shutdown_flags |= (1 << 4);
-	  if (HAL_GPIO_ReadPin(SDC_Final_GPIO_Port, SDC_Final_Pin)) shutdown_flags |= (1 << 3);
+    //added pei_status_msg struct to hold PEI status flags, instead of manually shifting and masking bits
+    pei_status_msg.pei_precharge = (relay_flags >> 0) & 0x01u;
+    pei_status_msg.pei_air_pos = (relay_flags >> 1) & 0x01u;
+    pei_status_msg.pei_air_neg = (relay_flags >> 2) & 0x01u;
+    pei_status_msg.pei_shutdown_final = HAL_GPIO_ReadPin(SDC_Final_GPIO_Port, SDC_Final_Pin GPIO_PIN_7);
+    pei_status_msg.pei_bms_ok = HAL_GPIO_ReadPin(BMS_OK_GPIO_Port, BMS_OK_Pin GPIO_PIN_11);
+    pei_status_msg.pei_imd_ok = HAL_GPIO_ReadPin(IMD_OK_GPIO_Port, IMD_OK_Pin GPIO_PIN_12);
 
 	  // Interlock state machine
 
@@ -445,7 +448,7 @@ int main(void)
 		  can_send_Charger();
 	  }
 	  else {
-		  can_send_PEI_Status(shutdown_flags);
+		  can_send_PEI_Status(&pei_status_msg);
 
 		  can_send_BMS_Status();
 		  can_send_BMS_Diagnostics();
@@ -669,9 +672,9 @@ static void MX_CAN1_Init(void)
   can1_filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
   can1_filter.FilterMode = CAN_FILTERMODE_IDMASK;
   can1_filter.FilterScale = CAN_FILTERSCALE_32BIT;
-  can1_filter.FilterIdHigh = 0x766 << 5;
+  can1_filter.FilterIdHigh = FRUCD_VEHICLE_STATE_FRAME_ID << 5; //Changed from hardocded value of 0x776 << 5 to FRUCD_VEHICLE_STATE_FRAME_ID << 5
   can1_filter.FilterIdLow = 0x0000;
-  can1_filter.FilterMaskIdHigh = 0x766 << 5;
+  can1_filter.FilterMaskIdHigh = FRUCD_VEHICLE_STATE_FRAME_ID << 5;
   can1_filter.FilterMaskIdLow = 0x0000;
   if (HAL_CAN_ConfigFilter(&hcan1, &can1_filter) != HAL_OK) {
 	  Error_Handler();
