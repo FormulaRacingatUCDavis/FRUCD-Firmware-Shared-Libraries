@@ -65,44 +65,36 @@ static void set_tx_header_defaults(CAN_TxHeaderTypeDef* const tx_header_ptr) {
 	tx_header_ptr->RTR = CAN_RTR_DATA;
 }
 
-void can_send_PEI_Status(uint8_t shutdown_flags) {
-	const uint32_t PEI_STATUS_MSG_ID = 0x387;
-	static uint32_t PEI_STATUS_TX_MAILBOX;
+void can_send_PEI_Status(uint8_t shutdown_flags){
+	struct frucd_status_t msg ={
+		.pei_imd_ok = (shutdown_flags >> 5) & 0x01u,
+		.pei_bms_ok = (shutdown_flags >> 4) & 0x01u,
+		.pei_shutdown_final = (shutdown_flags >> 3) & 0x01u,
+		.pei_air_neg = (shutdown_flags >> 2) & 0x01
+		.pei_air_pos = (shutdown_flags >> 1) & 0x01,
+		.pei_precharge = (shutdown_flags >> 0) & 0x01,
+		.pei_current_adc = bat_pack.current_raw,
+		.pei_current_reference = bat_pack.current_ref_raw
+	};
 
-	// Configure TX header
-	CAN_TxHeaderTypeDef tx_header;
-	set_tx_header_defaults(&tx_header);
-	tx_header.StdId = PEI_STATUS_MSG_ID;
-	tx_header.DLC = 5;
+	uint8_t tx_data[8] = {0};
+	int dlc = frucd_status_pack(tx_data, &msg, sizeof(tx_data));
 
-	uint8_t tx_data[8];
-	tx_data[0] = shutdown_flags;
-	tx_data[1] = HI8(bat_pack.current_raw);
-	tx_data[2] = LO8(bat_pack.current_raw);
-	tx_data[3] = HI8(bat_pack.current_ref_raw);
-	tx_data[4] = LO8(bat_pack.current_ref_raw);
-
-	HAL_CAN_AddTxMessage(&hcan1, &tx_header, tx_data, &PEI_STATUS_TX_MAILBOX);
+	can_send_std(&hcan1, FRUCD_PEI_STATUS_FRAME_ID, tx_data, dlc);
 }
 
-void can_send_PEI_Current() {
-	const uint32_t PEI_CURRENT_MSG_ID = 0x388;
-	static uint32_t PEI_CURRENT_TX_MAILBOX;
+void can_send_PEI_Current(){
+	struct frucd_current_t msg = {
+		.pei_current = frucd_current_pei_current_encode(bat_pack.current),
+	};
 
-	// Configure TX header
-	CAN_TxHeaderTypeDef tx_header;
-	set_tx_header_defaults(&tx_header);
-	tx_header.StdId = PEI_CURRENT_MSG_ID;
-	tx_header.DLC = 2;
+	uint8_t tx_data[8] = {0};
+	int dlc = frucd_current_pack(tx_data, &msg, sizeof(tx_data));
 
-	int16_t current = bat_pack.current * 100; // 2 decimals of precision
-
-	uint8_t tx_data[8];
-	tx_data[0] = HI8(current);
-	tx_data[1] = LO8(current);
-
-	HAL_CAN_AddTxMessage(&hcan2, &tx_header, tx_data, &PEI_CURRENT_TX_MAILBOX);
+	can_send_std(&hcan1, FRUCD_PEI_CURRENT_FRAME_ID, tx_data, dlc);
 }
+
+
 
 void can_send_Charger() {
 	const uint32_t PEI_CHARGER_TX_MSG_ID = 0x1806E5F4;
@@ -125,122 +117,76 @@ void can_send_Charger() {
 	HAL_CAN_AddTxMessage(&hcan2, &tx_header, tx_data, &PEI_CHARGER_TX_MAILBOX);
 }
 
-void can_send_BMS_Status() {
-	const uint32_t BMS_STATUS_MSG_ID = 0x380;
-	static uint32_t BMS_STATUS_TX_MAILBOX;
+void can_send_BMS_Status(void) {
+	struct frucd_bms_status_t msg = {
+		.pei_bms_status = bat_pack.status,
+		.pei_spi_error_flags = bat_pack.spi_fault_addresses,
+		.pei_max_faulting_ic_address = max_fault_addr,
+		.pei_communication_break_id = comm_bk_id
+	};
 
-	// Configure TX header
-	CAN_TxHeaderTypeDef tx_header;
-	set_tx_header_defaults(&tx_header);
-	tx_header.StdId = BMS_STATUS_MSG_ID;
-	tx_header.DLC = 5;
+	uint8_t tx_data[8] = {0};
+	int dlc = frucd_bms_status_pack(tx_data, &msg, sizeof(tx_data));
 
-	update_max_fault_data();
-
-	uint8_t tx_data[8];
-	tx_data[0] = bat_pack.status;
-	tx_data[1] = HI8(bat_pack.spi_fault_addresses);
-	tx_data[2] = LO8(bat_pack.spi_fault_addresses);
-	tx_data[3] = max_fault_addr;
-	tx_data[4] = max_faults;
-	tx_data[5] = (uint8_t)comm_bk_id;
-
-	HAL_CAN_AddTxMessage(&hcan1, &tx_header, tx_data, &BMS_STATUS_TX_MAILBOX);
+	can_send_std(&hcan1, FRUCD_BMS_STATUS_FRAME_ID, tx_data, dlc);
 }
 
-void can_send_BMS_Diagnostics() {
-	const uint32_t BMS_DIAGNOSTIC_DATA_MSG_ID = 0x381;
-	static uint32_t BMS_DIAGNOSTIC_DATA_TX_MAILBOX;
+void can_send_BMS_Diagnostics(void){
+	struct frucd_diagnostic_bms_data_t msg = {
+		.pei_hi_temp = bat_pack.HI_temp_c,
+		.pei_soc = bat_pack.SOC_percent,
+		.pei_pack_voltage = bat_pack.pack_voltage_raw
+	};
 
-	// Configure TX header
-	CAN_TxHeaderTypeDef tx_header;
-	set_tx_header_defaults(&tx_header);
-	tx_header.StdId = BMS_DIAGNOSTIC_DATA_MSG_ID;
-	tx_header.DLC = 4;
-
-	uint8_t tx_data[8];
-	tx_data[0] = bat_pack.HI_temp_c;
-	tx_data[1] = bat_pack.SOC_percent;
-	tx_data[2] = HI8(bat_pack.pack_voltage_raw);
-	tx_data[3] = LO8(bat_pack.pack_voltage_raw);
-
-	HAL_CAN_AddTxMessage(&hcan1, &tx_header, tx_data, &BMS_DIAGNOSTIC_DATA_TX_MAILBOX);
+	uint8_t tx_data[8] = {0};
+	int dlc = frucd_diagnostic_bms_data_pack(tx_data, &msg, sizeof(tx_data));
+	can_send_std(&hcan1, FRUCD_DIAGNOSTIC_BMS_DATA_FRAME_ID, tx_data, dlc);
 }
 
-void can_send_BMS_High_Level_Data() {
-	const uint32_t BMS_HIGH_LEVEL_DATA_MSG_ID = 0x382;
-	static uint32_t BMS_HIGH_LEVEL_DATA_TX_MAILBOX;
+void can_send_BMS_High_Level_Data(void) {
+	struct frucd_diagnostic_bms_data_t msg = {
+		.pei_hi_temp = frucd_high_level_bms_data_pei_hi_temp_encode(bat_pack.HI_temp_c),
+		.pei_soc = frucd_high_level_bms_data_pei_soc_encode(bat_pack.SOC_percent),
+		.pei_pack_voltage = frucd_high_level_bms_data_pei_pack_voltage_encode(bat_pack.pack_voltage_raw)
+	};
 
-	// Configure TX header
-	CAN_TxHeaderTypeDef tx_header;
-	set_tx_header_defaults(&tx_header);
-	tx_header.StdId = BMS_HIGH_LEVEL_DATA_MSG_ID;
-	tx_header.DLC = 6;
+	uint8_t tx_data[8] = {0};
+	int dlc = frucd_diagnostic_bms_data_pack(tx_data, &msg, sizeof(tx_data));
 
-	uint16_t HI_temp_c = bat_pack.HI_temp_c * 1000; // 3 decimals of precision
-	uint16_t pack_voltage = bat_pack.filt_pack_voltage * 100; // 2 decimals of precision
-	uint16_t pack_balance = bat_pack.filt_pack_balance * 100000; // 5 decimals of precision (2 if interpreted in mV)
-
-	uint8_t tx_data[8];
-	tx_data[0] = HI8(HI_temp_c);
-	tx_data[1] = LO8(HI_temp_c);
-	tx_data[2] = HI8(pack_voltage);
-	tx_data[3] = LO8(pack_voltage);
-	tx_data[4] = HI8(pack_balance);
-	tx_data[5] = LO8(pack_balance);
-
-	HAL_CAN_AddTxMessage(&hcan2, &tx_header, tx_data, &BMS_HIGH_LEVEL_DATA_TX_MAILBOX);
+	can_send_std(&hcan1, FRUCD_DIAGNOSTIC_BMS_DATA_FRAME_ID, tx_data, dlc);
 }
 
 void can_send_BMS_Subpack_Data(uint8_t subpack_num) {
-	const uint32_t BMS_SUBPACK_DATA_MSG_ID = 0x383;
-	static uint32_t BMS_SUBPACK_DATA_TX_MAILBOX;
+	struct frucd_subpack_data_t msg = {
+		.pei_subpack_num = subpack_num,
+		.pei_subpack_voltage = frucd_subpack_data_pei_subpack_voltage_encode(bat_pack.subpacks[subpack_num].filt_subpack_voltage),
+		.pei_subpack_balance = frucd_subpack_data_pei_subpack_balance_encode(bat_pack.subpacks[subpack_num].filt_subpack_balance)
+	};
 
-	// Configure TX header
-	CAN_TxHeaderTypeDef tx_header;
-	set_tx_header_defaults(&tx_header);
-	tx_header.StdId = BMS_SUBPACK_DATA_MSG_ID;
-	tx_header.DLC = 5;
+	uint8_t tx_data[8] = {0};
+	int dlc = frucd_subpack_data_pack(tx_data, &msg, sizeof(tx_data));
 
-	uint16_t subpack_voltage = bat_pack.subpacks[subpack_num].filt_subpack_voltage * 100; // 2 decimals of precision
-	uint16_t subpack_balance = bat_pack.subpacks[subpack_num].filt_subpack_balance * 100000; // 5 decimals of precision
-
-	uint8_t tx_data[8];
-	tx_data[0] = subpack_num;
-	tx_data[1] = HI8(subpack_voltage);
-	tx_data[2] = LO8(subpack_voltage);
-	tx_data[3] = HI8(subpack_balance);
-	tx_data[4] = LO8(subpack_balance);
-
-	HAL_CAN_AddTxMessage(&hcan2, &tx_header, tx_data, &BMS_SUBPACK_DATA_TX_MAILBOX);
+	can_send_std(&hcan1, FRUCD_BMS_SUBPACK_DATA_FRAME_ID, tx_data, dlc);
 }
 
-void can_send_BMS_Temps(uint8_t subpack_num, uint8_t group) {
-	const uint32_t BMS_TEMPS_MSG_ID = 0x384;
-	static uint32_t BMS_TEMPS_TX_MAILBOX;
+void can_send_BMS_Temps(uint8_t subpack_num, uint8_t group_num) {
+	uint8_t starting_cell = group_num * 3;
+	double temp1 = get_filtered_cell_temp(subpack_num, starting_cell);
+	double temp2 = get_filtered_cell_temp(subpack_num, starting_cell + 1);
+	double temp3 = get_filtered_cell_temp(subpack_num, starting_cell + 2);
 
-	// Configure TX header
-	CAN_TxHeaderTypeDef tx_header;
-	set_tx_header_defaults(&tx_header);
-	tx_header.StdId = BMS_TEMPS_MSG_ID;
-	tx_header.DLC = 8;
+	struct frucd_bms_temps_t msg = {
+		.pei_subpack = subpack_num,
+		.pei_group = group_num,
+		.pei_temp_1 = frucd_bms_temps_pei_temp_1_encode(temp1),
+		.pei_temp_2 = frucd_bms_temps_pei_temp_2_encode(temp2),
+		.pei_temp_3 = frucd_bms_temps_pei_temp_3_encode(temp3)
+	};
 
-	uint8_t starting_cell = group * 3;
-	uint16_t temp1 = get_filtered_cell_temp(subpack_num, starting_cell) * 1000;
-	uint16_t temp2 = group < 5 ? get_filtered_cell_temp(subpack_num, starting_cell + 1) * 1000 : 0;
-	uint16_t temp3 = group < 5 ? get_filtered_cell_temp(subpack_num, starting_cell + 2) * 1000 : 0;
+	uint8_t tx_data[8] = {0};
+	int dlc = frucd_bms_temps_pack(tx_data, &msg, sizeof(tx_data));
 
-	uint8_t tx_data[8];
-	tx_data[0] = subpack_num;
-	tx_data[1] = group;
-	tx_data[2] = HI8(temp1);
-	tx_data[3] = LO8(temp1);
-	tx_data[4] = HI8(temp2);
-	tx_data[5] = LO8(temp2);
-	tx_data[6] = HI8(temp3);
-	tx_data[7] = LO8(temp3);
-
-	HAL_CAN_AddTxMessage(&hcan2, &tx_header, tx_data, &BMS_TEMPS_TX_MAILBOX);
+	can_send_std(&hcan1, FRUCD_BMS_TEMPS_FRAME_ID, tx_data, dlc);
 }
 
 //This is the refactored FIFO 0 callback for PEI 
