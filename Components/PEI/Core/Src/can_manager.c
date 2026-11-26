@@ -70,7 +70,7 @@ void can_send_PEI_Status(uint8_t shutdown_flags){
 		.pei_imd_ok = (shutdown_flags >> 5) & 0x01u,
 		.pei_bms_ok = (shutdown_flags >> 4) & 0x01u,
 		.pei_shutdown_final = (shutdown_flags >> 3) & 0x01u,
-		.pei_air_neg = (shutdown_flags >> 2) & 0x01
+		.pei_air_neg = (shutdown_flags >> 2) & 0x01,
 		.pei_air_pos = (shutdown_flags >> 1) & 0x01,
 		.pei_precharge = (shutdown_flags >> 0) & 0x01,
 		.pei_current_adc = bat_pack.current_raw,

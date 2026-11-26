@@ -50,6 +50,12 @@ static void pack_init() {
 
 		bat_pack.subpacks[subpack].filt_subpack_voltage = 0;
 		bat_pack.subpacks[subpack].filt_subpack_balance = 0;
+
+		//initialize battery pack current limits to 0
+		bat_pack.current_raw = 0;
+		bat_pack.current = 0;
+		bat_pack.max_discharge_current = 0;
+		bat_pack.max_charge_current = 0;
 	}
 
 	// Initialize pack values
@@ -561,4 +567,42 @@ BMS_MODE_t bat_health_check() {
 	}
 
 	return BMS_NORMAL;
+}
+
+void update_current_limits(float nominal_discharge_a, float nominal_charge_a) {
+	if(bat_health_check() == BMS_FAULT) {
+		bat_pack.max_discharge_current = 0;
+		bat_pack.max_charge_current = 0;
+	}
+	
+	float hi_cell_v = bat_pack.HI_voltage_raw * 0.00015 + 1.5;
+	float lo_cell_v = bat_pack.LO_voltage_raw * 0.00015 + 1.5;
+	float max_dchg = nominal_discharge_a;
+	float max_chg = nominal_charge_a;
+
+	//Taper discharges near 2.6V under voltage limit or 60C over temp limit 
+	if(lo_cell_v < 2.5f){
+		float scale = (lo_cell_v - 2.2f) / (2.5f - 2.3f);
+		max_dchg *= (scale > 0.0f) ? scale : 0.0f;
+	}
+	if(bat_pack.HI_temp_c > 60.0f){
+		float scale = (80.0f - bat_pack.HI_temp_c) / (80.0f - 60.0f);
+		float temp_limit = nominal_discharge_a * ((scale > 0.0f) ? scale : 0.0f);
+		if(temp_limit < max_dchg) max_dchg = temp_limit;
+	} 
+
+	// Disable regen charging at 4.2V overvoltage or 0C undertemp limit 
+	if(hi_cell_v > 4.2f){
+		float scale = (4.2f - hi_cell_v) / (4.2f - 4.1f);
+		max_chg *= (scale > 0.0f) ? scale : 0.0f;
+	}
+	
+	if(bat_pack.LO_temp_c < 5.0f){
+		float scale = (bat_pack.LO_temp_c - 0.0f) / (5.0f - 0.0f);
+		float temp_limit = nominal_charge_a * ((scale > 0.0f) ? scale : 0.0f);
+		if(temp_limit < max_chg) max_chg = temp_limit;
+	}
+
+	bat_pack.max_discharge_current = max_dchg;
+	bat_pack.max_charge_current = max_chg;
 }

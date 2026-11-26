@@ -70,6 +70,8 @@ typedef struct {
 	uint16_t current_ref_raw;
 	uint16_t current_raw;
 	float current;
+	float max_discharge_current;
+	float max_charge_current;
 
 	float HI_temp_c;
 	uint8_t AVG_temp_c;
@@ -104,6 +106,10 @@ void process_temps();
 
 void disable_cell_balancing(SPI_HandleTypeDef* const hspi_ptr, TIM_HandleTypeDef* const htim_ptr);
 void balance_cells(SPI_HandleTypeDef* const hspi_ptr, TIM_HandleTypeDef* const htim_ptr);
+
+void update_current_limits(float nominal_discharge_a, float nominal_charge_a);
+void get_current_limits(float* max_discharge_a, float* max_charge_a);
+float get_pack_voltage();
 
 void update_max_fault_data();
 BMS_MODE_t bat_health_check();
