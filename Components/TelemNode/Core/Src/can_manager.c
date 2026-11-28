@@ -7,6 +7,7 @@
 
 #include "can_manager.h"
 #include "main.h"
+#include "motor_controller.h"
 
 extern CAN_HandleTypeDef hcan;
 
@@ -59,6 +60,86 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* hcan_ptr)
 		Error_Handler();
 	}
 
+	if(can_rx_header.IDE != CAN_ID_STD){
+		return;
+	}
+
+	switch(can_rx_header.StdId){
+		case VEHICLE_STATE: 
+			if(can_rx_header.DLC >= 5){
+				can_data.vcu_state = can_rx_data[4];
+			}
+			break;
+
+		case BMS_STATUS_MSG: 
+			if(can_rx_header.DLC >= 1){
+				can_data.bms_temp = can_rx_data[0];
+			}
+			break; 
+		
+		case MOTOR_CONTROLLER_M160_TEMPERATURE_SET_1_FRAME_ID:{ //0x0A0
+			struct motor_controller_m160_temperature_set_1_t temps1; 
+			if(motor_controller_m160_temperature_set_1_unpack(&temps1, can_rx_data, can_rx_header.DLC) == 0){
+				//Raw signals are already signed int16_t sacled at 0.1 deg C 
+				can_data.mc_temp_module_a = temps1.inv_module_a_temp; 
+				can_data.mc_temp_module_b = temps1.inv_module_b_temp;
+				can_data.mc_temp_module_c = temps1.inv_module_c_temp;
+
+				int16_t max_temp = can_data.mc_temp_module_a;
+				if(can_data.mc_temp_module_b > max_temp){
+					max_temp = can_data.mc_temp_module_b;
+				}
+				if(can_data.mc_temp_module_c > max_temp){
+					max_temp = can_data.mc_temp_module_c;
+				}
+
+				can_data.mc_temp_max = max_temp;
+				can_data.mc_temps1_last_tick = HAL_GetTick();
+			}
+			break; 
+		}
+
+		case MOTOR_CONTROLLER_M170_INTERNAL_STATES_FRAME_ID: { //0x0AA
+			struct motor_controller_m170_internal_states_t states;
+			if(motor_controller_m170_internal_states_unpack(&states, can_rx_data, can_rx_header.DLC) == 0){
+				can_data.inv_state = states.inv_inverter_state;
+				can_data.inv_vsm_state = states.inv_vsm_state;
+				can_data.inv_enable_lockout = states.inv_inverter_enable_lockout;
+				can_data.mc_states_last_tick = HAL_GetTick();
+			}
+			break;
+		}
+
+		case MOTOR_CONTROLLER_M171_FAULT_CODES_FRAME_ID:{ //0x0AB
+			struct motor_controller_m171_fault_codes_t faults;
+			if(motor_controller_m171_fault_codes_unpack(&faults, can_rx_data, can_rx_header.DLC) == 0){
+				can_data.inv_post_fault_lo = faults.inv_post_fault_lo;
+				can_data.inv_post_fault_hi = faults.inv_post_fault_hi;
+				can_data.inv_run_fault_lo = faults.inv_run_fault_lo;
+				can_data.inv_run_fault_hi = faults.inv_run_fault_hi;
+				can_data.mc_faults_last_tick = HAL_GetTick();
+			}
+			break;
+		}
+
+		case TORQUE_REQUEST: // 0x0C0 
+			if(can_rx_header.DLC >= 0){
+				can_data.inverter_enable = can_rx_data[5] & 0x01;
+			}
+			break; 
+
+		case PUMP_PWM: 
+			if(can_rx_header.DLC >= 1){
+				can_data.PWM_requested = (can_rx_data[0] == 1) ? 1 : 0;
+			}
+			break;
+
+		default: 
+			break;
+
+	}
+
+	/*
 	switch(can_rx_header.StdId)
 	{
 		case VEHICLE_STATE:
@@ -101,4 +182,6 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* hcan_ptr)
 			}
 			break;
 	}
+			*/
 }
+
