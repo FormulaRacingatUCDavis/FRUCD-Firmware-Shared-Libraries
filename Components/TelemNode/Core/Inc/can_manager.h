@@ -89,13 +89,33 @@ typedef enum {
 typedef struct {
 	VCU_STATE_t vcu_state;
 	uint8_t bms_temp;
+
+	//Signed 0.1 degree C units (matches raw signals in M160 / M162)
 	int16_t mc_temp_module_a;
 	int16_t mc_temp_module_b;
 	int16_t mc_temp_module_c;
 	int16_t mc_temp_max;
 	int16_t motor_temp;
+
+
 	uint8_t inverter_enable;
 	uint8_t PWM_requested;
+
+	//New fields from M170 (0x0AA) & M171 (0x0AB)
+	uint8_t inv_state;
+	uint8_t inv_vsm_state; 
+	uint8_t inv_enable_lockout;
+	uint16_t inv_post_fault_lo;
+	uint16_t inv_post_fault_high;
+	uint16_t inv_run_fault_hi;
+
+	//Timestamps 
+	uint32_t mc_temps1_last_tick;
+	uint32_t mc_temps3_last_tick;
+	uint32_t mc_states_last_tick;
+	uint32_t mc_faults_last_tick;
+
+	//PWM signals for pump and fan 
 	uint8_t pumpPWM;
 	uint8_t fanPWM;
 } CAN_DATA_t;

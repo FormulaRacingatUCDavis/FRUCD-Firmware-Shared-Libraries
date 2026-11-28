@@ -1,5 +1,6 @@
 #include "can_manager.h"
 #include "serial_print.h"
+#include "motor_controller.h"
 
 volatile uint8_t mc_lockout;
 volatile uint8_t mc_enabled;
