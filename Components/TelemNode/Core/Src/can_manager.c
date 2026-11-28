@@ -99,6 +99,29 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* hcan_ptr)
 			break; 
 		}
 
+		case MOTOR_CONTROLLER_M166_CURRENT_INFO_FRAME_ID: { //0x0A6
+			struct motor_controller_m166_current_info_t curr;
+			if(motor_controller_m166_current_info_unpack(&curr, can_rx_data, can_rx_header.DLC) == 0){
+				//Raw signals are signed int16_t scaled at 0.1A
+				can_data.inv_dc_bus_current = curr.inv_dc_bus_current;
+				can_data.inv_phase_a_current = curr.inv_phase_a_current; 
+				can_data.inv_phase_b_current = curr.inv_phase_b_current; 
+				can_data.inv_phase_c_current = curr.inv_phase_c_current; 
+				can_data.mc_current_last_tick = HAL_GetTick();
+			}
+			break; 
+		}
+
+		case MOTOR_CONTROLLER_M167_VOLTAGE_INFO_FRAME_ID: { //0x0A7
+			struct motor_controller_m167_voltage_info_t volt;
+			if(motor_controller_m167_voltage_info_unpack(&volt, can_rx_data, can_rx_header.DLC) == 0){
+				//Raw signal is signed int16_t scaled at 0.1V 
+				can_data.inv_dc_bus_voltage = volt.inv_dc_bus_voltage;
+				can_data.mc_voltage_last_tick = HAL_GetTick();
+			}
+			break;
+		}
+
 		case MOTOR_CONTROLLER_M170_INTERNAL_STATES_FRAME_ID: { //0x0AA
 			struct motor_controller_m170_internal_states_t states;
 			if(motor_controller_m170_internal_states_unpack(&states, can_rx_data, can_rx_header.DLC) == 0){

@@ -114,10 +114,27 @@ typedef struct {
 	uint32_t mc_temps3_last_tick;
 	uint32_t mc_states_last_tick;
 	uint32_t mc_faults_last_tick;
+	uint32_t mc_current_last_tick;
+	uint32_t mv_voltage_last_tick;
 
 	//PWM signals for pump and fan 
 	uint8_t pumpPWM;
 	uint8_t fanPWM;
+
+	//Electrical Temeletry (0.1V and 0.1A units)
+	int16_t inv_dc_bus_voltage; //M167 (0x0A7)
+	int16_t inv_dc_bus_current; //M166 (0x0A6)
+	int16_t inv_phase_a_current; //M166 (0x0A6)
+	int16_t inv_phase_b_current; //M166 (0x0A6)
+	int16_t inv_phase_c_current; //M166 (0x0A6)
+
+	//Derating & BMS limiting flags from M170 (0x0AA) 
+	uint8_t inv_bms_active;
+	uint8_t inv_bms_torque_limiting;
+	uint8_t inv_limit_coolant_derating;
+	uint8_t inv_limit_hot_spot; 
+	uint8_t inv_limit_stall_burst_model; 
+	uint8_t inv_limit_max_speed;
 } CAN_DATA_t;
 
 void CAN_Init();
